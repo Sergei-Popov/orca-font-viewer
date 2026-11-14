@@ -7,6 +7,8 @@ All notable changes to this plugin are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.0] - 2026-11-14
+
 ### Added
 
 - **Font Viewer** custom editor for `.ttf`, `.otf`, `.woff`, `.woff2`, `.ttc` and `.otc`: the

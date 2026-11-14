@@ -1,4 +1,4 @@
-/*! brotli.js 2.1.0 decompressor (MIT, Copyright Devon Govett), a port of Google's Brotli decoder (Copyright 2013 Google Inc., Apache License 2.0), with base64-js 1.5.1 (MIT, Copyright Jameson Little). See LICENSE. Bundled with esbuild. */
+/*! brotli.js 2.1.0 decompressor (MIT, Copyright Devon Govett), a port of Google's Brotli decoder (Copyright 2013 Google Inc., Apache License 2.0), with base64-js 1.5.1 (MIT, Copyright Jameson Little). See LICENSE. Bundled with esbuild and modified by Font Viewer: decompress() takes a max_size and stops before passing it (lines marked "font-viewer patch"). */
 var __create = Object.create;
 var __defProp = Object.defineProperty;
 var __getOwnPropDesc = Object.getOwnPropertyDescriptor;
@@ -3102,13 +3102,15 @@ function BrotliDecompressedSize(buffer) {
   var out = DecodeMetaBlockLength(br);
   return out.meta_block_length;
 }
-function decompress(buffer, output_size) {
+function decompress(buffer, output_size, max_size) {
   var input = new BrotliInput(buffer);
   if (output_size == null) {
     output_size = BrotliDecompressedSize(buffer);
   }
   var output_buffer = new Uint8Array(output_size);
   var output = new BrotliOutput(output_buffer);
+  // font-viewer patch: stop before a meta-block would take the output past max_size.
+  output.limit = max_size == null ? Infinity : max_size;
   BrotliDecompress(input, output);
   if (output.pos < output.buffer.length) {
     output.buffer = output.buffer.subarray(0, output.pos);
@@ -3182,6 +3184,10 @@ function BrotliDecompress(input, output) {
     br.readMoreInput();
     var _out = DecodeMetaBlockLength(br);
     meta_block_remaining_len = _out.meta_block_length;
+    // font-viewer patch: refuse output beyond the caller's limit instead of growing the buffer.
+    if (!_out.is_metadata && pos + meta_block_remaining_len > output.limit) {
+      throw new Error("Brotli data holds more than " + output.limit + " bytes");
+    }
     if (pos + meta_block_remaining_len > output.buffer.length) {
       var tmp = new Uint8Array(pos + meta_block_remaining_len);
       tmp.set(output.buffer);

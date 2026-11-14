@@ -1,2 +1,2 @@
-/** Decompresses one Brotli stream; `outSize` is the expected size when known. */
-export function decompress(buffer: ArrayLike<number>, outSize?: number | null): Uint8Array
+/** Decompresses a Brotli stream; with `maxSize`, throws once the output would exceed it. */
+export function decompress(buffer: ArrayLike<number>, outSize?: number | null, maxSize?: number): Uint8Array

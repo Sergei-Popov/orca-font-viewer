@@ -3,6 +3,7 @@
 
 import { alphabetLines, formatNumber } from '../describe'
 import { compareFeatures, featureName, isOnByDefault, isUserFeature } from '../font/features'
+import { snapAxisValue } from '../render'
 import type { AxisInfo, FaceInfo } from '../font/info'
 import type { Language, Strings } from '../i18n'
 import { icon } from '../icons'
@@ -186,11 +187,9 @@ export class PreviewTab {
     this.sample.style.lineHeight = String(this.state.lineHeight)
   }
 
+  /** Untouched axes are left to Chromium (automatic optical size, the font's defaults). */
   private resetAxes(): void {
     this.state.axes.clear()
-    for (const axis of this.info?.axes ?? []) {
-      this.state.axes.set(axis.tag, axis.default)
-    }
   }
 
   private sidePanel(info: FaceInfo): HTMLElement | null {
@@ -200,11 +199,12 @@ export class PreviewTab {
     if (axes.length) {
       parts.push(this.axesPanel(axes, info))
     }
-    const features = info.features.map((f) => f.tag).filter(isUserFeature).sort(compareFeatures)
+    const entries = new Map(info.features.map((f) => [f.tag, f]))
+    const features = [...entries.keys()].filter(isUserFeature).sort(compareFeatures)
     if (features.length) {
       const list = h('div', { class: 'fv-chips' })
       for (const tag of features) {
-        const entry = info.features.find((f) => f.tag === tag)!
+        const entry = entries.get(tag)!
         const on = this.state.features.get(tag) ?? isOnByDefault(tag)
         const name = featureName(tag, entry.uiName, this.host.language)
         const box = html('span', { class: 'fv-chip-box' }, on ? icon('check') : '')
@@ -258,6 +258,7 @@ export class PreviewTab {
         if (control) {
           control.input.value = String(value)
           control.output.textContent = formatNumber(value, this.host.language)
+          control.output.removeAttribute('title')
           paintRange(control.input)
         }
       }
@@ -266,23 +267,30 @@ export class PreviewTab {
 
     const rows = axes.map((axis) => {
       const value = this.state.axes.get(axis.tag) ?? axis.default
-      const step = axis.max - axis.min <= 2 ? 0.01 : axis.max - axis.min <= 20 ? 0.1 : 1
+      // step="any": a fixed step counts from the minimum and can miss the maximum (294.67–900).
       const input = h('input', {
         class: 'fv-range',
         type: 'range',
         min: axis.min,
         max: axis.max,
-        step,
+        step: 'any',
         value,
         'aria-label': `${axis.name} (${axis.tag})`
       })
-      const output = h('span', { class: 'fv-value' }, formatNumber(value, this.host.language))
+      // Untouched, optical size follows the text size (Chromium's font-optical-sizing: auto).
+      const auto = axis.tag === 'opsz' && !this.state.axes.has(axis.tag)
+      const output = h(
+        'span',
+        { class: 'fv-value', title: auto ? s.axisAutoHint : null },
+        auto ? s.axisAuto : formatNumber(value, this.host.language)
+      )
       paintRange(input)
       inputs.set(axis.tag, { input, output })
       input.addEventListener('input', () => {
-        const next = Number(input.value)
+        const next = snapAxisValue(Number(input.value), axis)
         this.state.axes.set(axis.tag, next)
         output.textContent = formatNumber(next, this.host.language)
+        output.removeAttribute('title')
         paintRange(input)
         matchInstance()
         this.host.onStyleChange()

@@ -30,14 +30,39 @@ export function fontMime(bytes: Uint8Array): string {
   return 'font/ttf'
 }
 
-/** Axis values for a face: kept from the previous face where the axis exists and fits, else its default. */
+/**
+ * The axis values a person set (with a slider or a named instance), kept for a new face where the
+ * axis exists and the value fits. Axes nobody touched stay out, so Chromium keeps its own choices
+ * for them, such as automatic optical size.
+ */
 export function axesFor(info: FaceInfo, previous: ReadonlyMap<string, number>): Map<string, number> {
   const axes = new Map<string, number>()
   for (const axis of info.axes) {
     const value = previous.get(axis.tag)
-    axes.set(axis.tag, value !== undefined && value >= axis.min && value <= axis.max ? value : axis.default)
+    if (value !== undefined && value >= axis.min && value <= axis.max) axes.set(axis.tag, value)
   }
   return axes
+}
+
+type AxisRange = { min: number; default: number; max: number }
+
+/** The rounding a slider applies to an axis: whole units for wide ranges, finer for narrow ones. */
+export function axisStep(axis: AxisRange): number {
+  const span = axis.max - axis.min
+  return span > 100 ? 1 : span > 10 ? 0.1 : 0.01
+}
+
+/**
+ * A slider position (the input uses step="any") as an axis value: the minimum, maximum and default
+ * are reachable exactly even when they are not multiples of the step; other values are rounded.
+ */
+export function snapAxisValue(raw: number, axis: AxisRange): number {
+  const step = axisStep(axis)
+  for (const anchor of [axis.min, axis.max, axis.default]) {
+    if (Math.abs(raw - anchor) <= step / 2) return anchor
+  }
+  const rounded = Math.round(raw / step) * step
+  return Math.min(axis.max, Math.max(axis.min, Number(rounded.toFixed(2))))
 }
 
 /** The CSS variable values for the viewed face. */
@@ -49,9 +74,11 @@ export function faceStyle(
 ): { font: string; variation: string; features: string } {
   const present = new Set(info?.features.map((f) => f.tag) ?? [])
   const used = new Map([...features].filter(([tag]) => present.has(tag)))
+  const axisTags = new Set(info?.axes.map((a) => a.tag) ?? [])
+  const moved = new Map([...axes].filter(([tag]) => axisTags.has(tag)))
   return {
     font: family ? `"${family}", var(--ui-font)` : 'var(--ui-font)',
-    variation: info?.axes.length ? variationSettings(axes) : 'normal',
+    variation: variationSettings(moved),
     features: featureSettings(used)
   }
 }

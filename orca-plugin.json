@@ -8,7 +8,7 @@
   "description": "Fonts in Orca's editor tabs: opens .ttf, .otf, .woff, .woff2, .ttc and .otc files with sample text at any size, a waterfall of sizes, variable axes and named instances, OpenType feature switches, every character grouped by Unicode block with code points to copy, and the font's names, metrics, licence, embedding rights and tables. Works offline, never edits the file.",
   "author": { "name": "Sergei Popov", "url": "https://github.com/Sergei-Popov" },
   "repository": "https://github.com/Sergei-Popov/orca-font-viewer",
-  "license": "MIT",
+  "license": "MIT AND Apache-2.0",
   "icon": "images/icon.png",
   "engines": { "orca": ">=1.4.248" },
   "pluginApi": 1,

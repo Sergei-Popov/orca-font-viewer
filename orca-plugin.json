@@ -1,32 +1,66 @@
 {
   "$schema": "https://raw.githubusercontent.com/stablyai/orca/main/docs/schemas/plugins/orca-plugin.v2.schema.json",
   "manifestVersion": 2,
+  "execution": "sandboxed-ui",
   "id": "font-viewer",
   "name": "Font Viewer",
   "version": "0.1.0",
-  "description": "Preview .ttf, .otf, .woff and .woff2 fonts in Orca's editor tabs: sample text at any size, every character, variable axes, OpenType features and the font's details.",
+  "description": "Fonts in Orca's editor tabs: opens .ttf, .otf, .woff, .woff2, .ttc and .otc files with sample text at any size, a waterfall of sizes, variable axes and named instances, OpenType feature switches, every character grouped by Unicode block with code points to copy, and the font's names, metrics, licence, embedding rights and tables. Works offline, never edits the file.",
+  "author": {
+    "name": "Sergei Popov",
+    "url": "https://github.com/Sergei-Popov"
+  },
+  "repository": "https://github.com/Sergei-Popov/orca-font-viewer",
+  "license": "MIT AND Apache-2.0",
+  "icon": "images/icon.png",
+  "cover": {
+    "path": "images/cover.png",
+    "alt": "Inter in Font Viewer: sample text, a waterfall of sizes and the alphabets, with the optical size and weight axes and OpenType features on the right."
+  },
+  "screenshots": [
+    {
+      "path": "images/preview-light.png",
+      "alt": "Source Serif 4 at weight 602 with Orca's light theme: sample text, the size waterfall, the Weight and Optical Size sliders and OpenType features.",
+      "caption": "Move variable axes and switch OpenType features on your own text.",
+      "theme": "light"
+    },
+    {
+      "path": "images/characters-dark.png",
+      "alt": "Inter's Characters tab with Orca's dark theme: a grid of characters with code points, the ampersand selected with its HTML, CSS and JavaScript forms.",
+      "caption": "Every character the font maps, with code points to copy.",
+      "theme": "dark"
+    },
+    {
+      "path": "images/info-light.png",
+      "alt": "The Info tab for Lora with Orca's light theme: names, designer and vendor links, style and metrics, the weight axis and the licence.",
+      "caption": "Names, metrics, axes and the font's licence.",
+      "theme": "light"
+    }
+  ],
   "engines": {
     "orca": ">=1.4.248"
   },
-  "execution": "sandboxed-ui",
   "pluginApi": 1,
   "contributes": {
     "customEditors": [
       {
-        "id": "font-viewer",
+        "id": "font",
         "title": "Font Viewer",
+        "icon": "icons/font.png",
         "extensions": [
-          ".font-viewer"
+          ".ttf",
+          ".otf",
+          ".woff",
+          ".woff2",
+          ".ttc",
+          ".otc"
         ],
-        "entry": "editor/main.ts",
+        "entry": "src/editor.ts",
+        "priority": "default",
+        "contentKind": "bytes",
         "frame": "isolated"
       }
     ]
   },
-  "author": {
-    "name": "Сергей Попов",
-    "url": "https://github.com/Sergei-Popov"
-  },
-  "repository": "https://github.com/Sergei-Popov/orca-font-viewer",
-  "license": "MIT"
+  "capabilities": []
 }

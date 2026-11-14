@@ -1,32 +1,30 @@
 {
   "$schema": "https://raw.githubusercontent.com/stablyai/orca/main/docs/schemas/plugins/orca-plugin.v2.schema.json",
   "manifestVersion": 2,
+  "execution": "sandboxed-ui",
   "id": "font-viewer",
   "name": "Font Viewer",
   "version": "0.1.0",
-  "description": "Preview .ttf, .otf, .woff and .woff2 fonts in Orca's editor tabs: sample text at any size, every character, variable axes, OpenType features and the font's details.",
-  "engines": {
-    "orca": ">=1.4.248"
-  },
-  "execution": "sandboxed-ui",
+  "description": "Fonts in Orca's editor tabs: opens .ttf, .otf, .woff, .woff2, .ttc and .otc files with sample text at any size, a waterfall of sizes, variable axes and named instances, OpenType feature switches, every character grouped by Unicode block with code points to copy, and the font's names, metrics, licence, embedding rights and tables. Works offline, never edits the file.",
+  "author": { "name": "Sergei Popov", "url": "https://github.com/Sergei-Popov" },
+  "repository": "https://github.com/Sergei-Popov/orca-font-viewer",
+  "license": "MIT",
+  "icon": "images/icon.png",
+  "engines": { "orca": ">=1.4.248" },
   "pluginApi": 1,
   "contributes": {
     "customEditors": [
       {
-        "id": "font-viewer",
+        "id": "font",
         "title": "Font Viewer",
-        "extensions": [
-          ".font-viewer"
-        ],
-        "entry": "editor/main.ts",
+        "icon": "icons/font.png",
+        "extensions": [".ttf", ".otf", ".woff", ".woff2", ".ttc", ".otc"],
+        "entry": "src/editor.ts",
+        "priority": "default",
+        "contentKind": "bytes",
         "frame": "isolated"
       }
     ]
   },
-  "author": {
-    "name": "Сергей Попов",
-    "url": "https://github.com/Sergei-Popov"
-  },
-  "repository": "https://github.com/Sergei-Popov/orca-font-viewer",
-  "license": "MIT"
+  "capabilities": []
 }

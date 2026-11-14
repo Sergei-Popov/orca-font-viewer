@@ -1,5 +1,7 @@
 # Font Viewer for Orca
 
+![Font Viewer in an Orca tab](images/cover.png)
+
 Fonts in [Orca](https://orca.dev)'s editor tabs — opened from the file tree, a file link in an
 agent chat, or `orca file open`, just like images. Without the plugin Orca shows
 "Binary file — cannot display" for them.

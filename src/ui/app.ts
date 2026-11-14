@@ -4,7 +4,7 @@
 import { defaultSample } from '../describe'
 import { FontError } from '../font/bytes'
 import { type FontContainer, openFont } from '../font/container'
-import { type FaceInfo, describeContainer, faceLabel } from '../font/info'
+import { type FaceInfo, type TableCache, describeFace, faceLabel, newTableCache } from '../font/info'
 import { type Language, type Strings, fill } from '../i18n'
 import { icon } from '../icons'
 import { axesFor, faceStyle, fontMime, renderSource } from '../render'
@@ -19,7 +19,12 @@ const TABS: TabId[] = ['preview', 'characters', 'info']
 type Loaded = {
   bytes: Uint8Array
   container: FontContainer
-  faces: FaceInfo[]
+  /** Picker labels of a collection's faces (names only); empty for a single font. */
+  labels: string[]
+  /** Faces described so far: only the ones the person has looked at. */
+  infos: Map<number, FaceInfo>
+  /** Parsed tables shared between faces. */
+  cache: TableCache
   /** FontFace family per face index, or the reason it failed. */
   drawn: Map<number, { family: string } | { error: string }>
 }
@@ -36,6 +41,8 @@ export class App {
   private readonly notice = h('div', { class: 'fv-notice fv-hidden', role: 'status' })
   private readonly body = h('div', { class: 'fv-body' })
   private readonly message = h('div', { class: 'fv-message fv-hidden' })
+  /** A message over the tabs for a collection face that cannot be shown; the picker stays. */
+  private readonly faceMessage = h('div', { class: 'fv-message error fv-hidden' })
   private readonly tabButtons = new Map<TabId, HTMLButtonElement>()
   private readonly preview: PreviewTab
   private readonly characters: CharactersTab
@@ -95,6 +102,7 @@ export class App {
       panel.setAttribute('aria-labelledby', `fv-tab-${id}`)
       this.body.append(panel)
     }
+    this.body.append(this.faceMessage)
     this.root.append(this.header, this.tabBar, this.notice, this.body, this.message)
     this.selectTab(this.tab)
   }
@@ -122,23 +130,69 @@ export class App {
       this.showMessage(s.errorTitle, errorText(error, s), 'error')
       return
     }
-    const faces = describeContainer(container, this.language)
+    const cache = newTableCache()
+    const labels = container.collection
+      ? container.faces.map((face, i) => {
+          const label = faceLabel(face, i, this.language, cache)
+          return face.error ? fill(s.faceDamaged, { label }) : label
+        })
+      : []
+    const loaded: Loaded = { bytes, container, labels, infos: new Map(), cache, drawn: new Map() }
+    if (!container.collection) {
+      // A single font without head, name or cmap (for example cut short) cannot be shown at all.
+      const info = this.infoOf(loaded, 0)
+      if (info.damaged) {
+        this.loaded = null
+        this.dropFontFaces()
+        this.dropStaleFaces()
+        this.header.replaceChildren()
+        this.showMessage(s.errorTitle, fill(s.errorDamaged, { detail: info.damaged }), 'error')
+        return
+      }
+    }
     const reload = this.loaded !== null
     this.dropStaleFaces()
     this.staleFaces = this.fontFaces
     this.fontFaces = []
     this.loadToken++
-    this.loaded = { bytes, container, faces, drawn: new Map() }
-    if (!reload || this.faceIndex >= faces.length) this.faceIndex = 0
+    this.loaded = loaded
+    if (!reload || this.faceIndex >= container.faces.length) {
+      this.faceIndex = Math.max(0, container.faces.findIndex((face) => !face.error))
+    }
     this.message.className = 'fv-message fv-hidden'
     this.showFace()
+  }
+
+  /** Describes face `index` the first time it is shown. */
+  private infoOf(loaded: Loaded, index: number): FaceInfo {
+    let info = loaded.infos.get(index)
+    if (!info) {
+      info = describeFace(loaded.container.faces[index], this.language, loaded.cache)
+      loaded.infos.set(index, info)
+    }
+    return info
   }
 
   private showFace(): void {
     const loaded = this.loaded
     if (!loaded) return
-    const info = loaded.faces[this.faceIndex]
+    const info = this.infoOf(loaded, this.faceIndex)
     const face = loaded.container.faces[this.faceIndex]
+    this.renderHeader(loaded, info)
+    if (info.damaged) {
+      this.loadToken++
+      this.family = null
+      this.notice.classList.add('fv-hidden')
+      this.faceMessage.replaceChildren(
+        html('div', {}, icon('error')),
+        h('h2', {}, this.strings.faceErrorTitle),
+        h('p', {}, fill(this.strings.faceDamagedDetail, { detail: info.damaged }))
+      )
+      this.faceMessage.classList.remove('fv-hidden')
+      this.applyStyle()
+      return
+    }
+    this.faceMessage.classList.add('fv-hidden')
     const state = this.preview.state
     const axes = axesFor(info, state.axes)
     state.axes.clear()
@@ -154,7 +208,7 @@ export class App {
 
   private renderHeader(loaded: Loaded, info: FaceInfo): void {
     const s = this.strings
-    const { container, faces } = loaded
+    const { container, labels } = loaded
     const number = (value: number) => value.toLocaleString(this.language === 'ru' ? 'ru-RU' : 'en-US')
     const badges = h('div', { class: 'fv-badges' })
     const badge = (text: string, strong = false) => badges.append(h('span', { class: strong ? 'fv-badge strong' : 'fv-badge' }, text))
@@ -165,20 +219,20 @@ export class App {
     if (info.variable) badge(s.badgeVariable)
     if (info.color.length) badge(`${s.badgeColor} · ${info.color.join(', ')}`)
     if (info.monospace) badge(s.badgeMonospace)
-    if (container.collection) badge(`${s.badgeCollection} · ${faces.length}`)
+    if (container.collection) badge(`${s.badgeCollection} · ${labels.length}`)
     if (info.glyphCount !== null) badge(fill(s.badgeGlyphs, { n: number(info.glyphCount) }))
     badge(fill(s.badgeChars, { n: number(info.cmap.codes.length) }))
 
     const title = h(
       'div',
       { class: 'fv-title' },
-      h('h1', { title: info.names.fullName ?? info.family }, info.family || s.unnamed),
+      h('h1', { title: info.names.fullName ?? info.family }, info.family || labels[this.faceIndex] || s.unnamed),
       info.style ? h('span', {}, info.style) : null
     )
     const parts: (HTMLElement | null)[] = [title, badges, h('span', { class: 'fv-spacer' })]
-    if (faces.length > 1) {
+    if (labels.length > 1) {
       const picker = h('select', { class: 'fv-select', 'aria-label': s.face })
-      faces.forEach((face, i) => picker.append(h('option', { value: String(i) }, faceLabel(face, i))))
+      labels.forEach((label, i) => picker.append(h('option', { value: String(i) }, label)))
       picker.value = String(this.faceIndex)
       picker.addEventListener('change', () => {
         this.faceIndex = Number(picker.value)
@@ -190,7 +244,7 @@ export class App {
           { class: 'fv-face-picker' },
           h('span', {}, s.face),
           picker,
-          h('span', {}, fill(s.faceOf, { n: this.faceIndex + 1, total: faces.length }))
+          h('span', {}, fill(s.faceOf, { n: this.faceIndex + 1, total: labels.length }))
         )
       )
     }
@@ -215,11 +269,18 @@ export class App {
     const token = ++this.loadToken
     let result = loaded.drawn.get(index)
     if (!result) {
-      const source = renderSource(loaded.container, index, loaded.bytes)
+      let source: ReturnType<typeof renderSource>
+      try {
+        source = renderSource(loaded.container, index, loaded.bytes)
+      } catch (error) {
+        source = { kind: 'error', message: describeError(error) }
+      }
       if (source.kind === 'woff2-collection') {
         result = { error: this.strings.renderFailedWoff2Collection }
+      } else if (source.kind === 'error') {
+        result = { error: source.message }
       } else {
-        result = await this.loadFontFace(source.bytes)
+        result = await this.loadFontFace(source.bytes, loaded)
       }
       loaded.drawn.set(index, result)
     }
@@ -238,31 +299,32 @@ export class App {
   }
 
   /** ArrayBuffer first; a data: URL (allowed by the frame's font-src) if Chromium refuses it. */
-  private async loadFontFace(bytes: Uint8Array): Promise<{ family: string } | { error: string }> {
+  private async loadFontFace(bytes: Uint8Array, loaded: Loaded): Promise<{ family: string } | { error: string }> {
     const family = `fv-face-${++serial}`
     const buffer = bytes.slice().buffer
     let firstError: unknown
     try {
       const face = new FontFace(family, buffer)
       await face.load()
-      this.addFontFace(face)
-      return { family }
+      return this.adopt(face, family, loaded)
     } catch (error) {
       firstError = error
     }
     try {
       const face = new FontFace(family, `url(data:${fontMime(bytes)};base64,${base64(bytes)})`)
       await face.load()
-      this.addFontFace(face)
-      return { family }
+      return this.adopt(face, family, loaded)
     } catch {
       return { error: describeError(firstError) }
     }
   }
 
-  private addFontFace(face: FontFace): void {
+  /** Adds a loaded FontFace to the page, unless the file changed while it loaded. */
+  private adopt(face: FontFace, family: string, loaded: Loaded): { family: string } | { error: string } {
+    if (this.loaded !== loaded) return { error: 'the file changed while the font loaded' }
     fonts.add(face)
     this.fontFaces.push(face)
+    return { family }
   }
 
   private dropFontFaces(): void {
@@ -278,7 +340,7 @@ export class App {
   }
 
   private applyStyle(): void {
-    const info = this.loaded?.faces[this.faceIndex] ?? null
+    const info = this.loaded?.infos.get(this.faceIndex) ?? null
     const style = faceStyle(info, this.family, this.preview.state.axes, this.preview.state.features)
     const root = document.documentElement.style
     root.setProperty('--fv-font', style.font)

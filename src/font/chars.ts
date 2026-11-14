@@ -125,28 +125,56 @@ export type CharQuery =
   | { kind: 'range'; from: number; to: number }
   | { kind: 'block'; text: string }
 
+/** Lower case without apostrophes, so "n'ko" finds "NKo". */
+function normalize(text: string): string {
+  return text.toLowerCase().replace(/['’]/g, '')
+}
+
+/** Whether every word of `query` occurs in the block name: "IPA ext", "box draw", "cjk ext". */
+export function blockNameMatches(query: string, name: string): boolean {
+  const target = normalize(name)
+  const words = normalize(query).split(/\s+/).filter(Boolean)
+  return words.length > 0 && words.every((word) => target.includes(word))
+}
+
+/** Every block name the search knows, in English and Russian. */
+const BLOCK_LABELS = [...new Set([...BLOCK_STARTS.map(([, name]) => name).filter(Boolean), ...Object.values(BLOCK_NAMES_RU)])]
+
+function matchesSomeBlock(text: string): boolean {
+  return BLOCK_LABELS.some((name) => blockNameMatches(text, name))
+}
+
+const RANGE = /^(u\+|0x)?([0-9a-f]{1,6})\s*(?:-|–|—|\.\.|…)\s*(?:u\+|0x)?([0-9a-f]{1,6})$/i
+
 /**
- * What the Characters search box asks for: "U+0041", "u+41", "0x41", "U+0400-04FF", typed
- * characters ("Ёж"), or words that match a block name ("cyrillic", "кирил").
+ * What the Characters search box asks for: "U+0041", "u+41", "0x41", a range ("U+0400-04FF",
+ * "U+0400..U+04FF", "400-4FF"), words of a block name ("cyrillic", "latin-1", "IPA ext",
+ * "кирил"), or typed characters ("Ёж"). Text that holds nothing to search for shows everything.
  */
 export function parseCharQuery(input: string): CharQuery {
   const text = input.trim()
-  if (!text) return { kind: 'all' }
-  const range = /^(?:u\+|0x)?([0-9a-f]{2,6})\s*[-–…]\s*(?:u\+|0x)?([0-9a-f]{2,6})$/i.exec(text)
-  if (range && /^(u\+|0x)/i.test(text)) {
-    const from = parseInt(range[1], 16)
-    const to = parseInt(range[2], 16)
+  const parts = text.split(/[\s,]+/).filter(Boolean)
+  if (!parts.length) return { kind: 'all' }
+  const range = RANGE.exec(text)
+  // Without U+/0x, a range needs digits on both sides, so "ab-cd" or "latin-1" are not ranges.
+  if (range && (range[1] || (range[2].length >= 2 && range[3].length >= 2 && /\d/.test(range[2] + range[3])))) {
+    const from = parseInt(range[2], 16)
+    const to = parseInt(range[3], 16)
     return { kind: 'range', from: Math.min(from, to), to: Math.max(from, to) }
   }
-  const codes = text.split(/[\s,]+/).filter(Boolean)
-  if (codes.every((part) => /^(u\+|0x)[0-9a-f]{1,6}$/i.test(part))) {
-    return { kind: 'codes', codes: new Set(codes.map((part) => parseInt(part.slice(2), 16))) }
+  if (parts.every((part) => /^(u\+|0x)[0-9a-f]{1,6}$/i.test(part))) {
+    return { kind: 'codes', codes: new Set(parts.map((part) => parseInt(part.slice(2), 16))) }
   }
-  const letters = [...text.replace(/\s+/g, '')]
-  if (letters.length <= 8 && !/^[a-z]{3,}$/i.test(text) && !/^[а-яё]{3,}$/i.test(text)) {
+  // Words: a block name when one matches ("latin-1", "box draw", "Thai"), else typed characters.
+  const wordy = /[\s-]/.test(text) || /^[\p{L}'’]{3,}$/u.test(text)
+  if (wordy && matchesSomeBlock(text)) {
+    return { kind: 'block', text: normalize(text) }
+  }
+  const letters = [...parts.join('')]
+  if (letters.length <= 8) {
     return { kind: 'codes', codes: new Set(letters.map((c) => c.codePointAt(0)!)) }
   }
-  return { kind: 'block', text: text.toLowerCase() }
+  return { kind: 'block', text: normalize(text) }
 }
 
 /** Whether `code` (in `block`, shown as `label`) matches the query. */
@@ -159,7 +187,7 @@ export function matchesQuery(query: CharQuery, code: number, block: string, labe
     case 'range':
       return code >= query.from && code <= query.to
     case 'block':
-      return block.toLowerCase().includes(query.text) || label.toLowerCase().includes(query.text)
+      return blockNameMatches(query.text, block) || blockNameMatches(query.text, label)
   }
 }
 

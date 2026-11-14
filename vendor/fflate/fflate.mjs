@@ -1,4 +1,4 @@
-/*! fflate 0.8.3 (unzlibSync only), MIT License, Copyright (c) 2026 Arjun Barrett. See LICENSE. Bundled with esbuild. */
+/*! fflate 0.8.3 (unzlibSync only), MIT License, Copyright (c) 2026 Arjun Barrett. See LICENSE. Bundled with esbuild and modified by Font Viewer: inflating into a fixed output buffer stops once the data runs past it (line marked "font-viewer patch"). */
 
 // node_modules/fflate/esm/browser.js
 var u8 = Uint8Array;
@@ -299,6 +299,9 @@ var inflt = function(dat, st, buf, dict) {
     var lms = (1 << lbt) - 1, dms = (1 << dbt) - 1;
     var lpos = pos;
     for (; ; lpos = pos) {
+      // font-viewer patch: with a fixed output buffer, stop once the data runs past it.
+      if (!resize && bt > buf.length)
+        throw new Error("inflated data is larger than the output buffer");
       var c = lm[bits16(dat, pos) & lms], sym = c >> 4;
       pos += c & 15;
       if (pos > tbts) {

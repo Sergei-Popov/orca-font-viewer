@@ -18,7 +18,7 @@ import { featureName, featureSettings, isOnByDefault, isUserFeature, variationSe
 import { openFont } from './font/container'
 import { describeFace } from './font/info'
 import { otfFixture, ttfFixture } from './font/test-fixtures'
-import { groupByBlock, layoutGrid, rowOf, visibleRange } from './grid'
+import { groupByBlock, layoutGrid, moveInGrid, rowOf, visibleRange } from './grid'
 import { fill, stringsFor } from './i18n'
 
 const en = stringsFor('en-US')
@@ -64,6 +64,54 @@ test('understands the Characters search box', () => {
   assert.ok(matchesQuery(parseCharQuery('cyril'), 0x411, 'Cyrillic', 'Кириллица'))
   assert.ok(matchesQuery(parseCharQuery('кирил'), 0x411, 'Cyrillic', 'Кириллица'))
   assert.ok(!matchesQuery(parseCharQuery('greek'), 0x411, 'Cyrillic', 'Cyrillic'))
+})
+
+test('reads block names, ranges and punctuation in the search box the way they are meant', () => {
+  const block = (query: string, code: number, name: string) => matchesQuery(parseCharQuery(query), code, name, name)
+  // Separators alone search for nothing.
+  assert.deepEqual(parseCharQuery(','), { kind: 'all' })
+  assert.deepEqual(parseCharQuery(' , ,'), { kind: 'all' })
+  // Block names with digits, hyphens and abbreviations are not ranges or typed letters.
+  assert.equal(parseCharQuery('latin-1').kind, 'block')
+  assert.ok(block('latin-1', 0xe9, 'Latin-1 Supplement'))
+  assert.ok(block('box draw', 0x2500, 'Box Drawing'))
+  assert.ok(block('IPA ext', 0x250, 'IPA Extensions'))
+  assert.ok(block('greek ext', 0x1f00, 'Greek Extended'))
+  assert.ok(!block('greek ext', 0x391, 'Greek and Coptic'))
+  assert.ok(block("n'ko", 0x7c0, 'NKo'))
+  // Short letter runs are typed characters, a ligature included.
+  const ffi = parseCharQuery('ffi')
+  assert.ok(ffi.kind === 'codes' && ffi.codes.has(0x66) && ffi.codes.has(0x69) && ffi.codes.size === 2)
+  // Ranges, with or without prefixes and in several notations.
+  assert.deepEqual(parseCharQuery('U+0400..U+04FF'), { kind: 'range', from: 0x400, to: 0x4ff })
+  assert.deepEqual(parseCharQuery('400-4FF'), { kind: 'range', from: 0x400, to: 0x4ff })
+  assert.deepEqual(parseCharQuery('0x4FF – 0x400'), { kind: 'range', from: 0x400, to: 0x4ff })
+  assert.notEqual(parseCharQuery('ab-cd').kind, 'range')
+})
+
+test('arrow keys keep the column across block boundaries', () => {
+  // Latin: 5 cells in rows of 4 (4 + 1); Cyrillic: 6 cells (4 + 2); Emoticons: 1.
+  const codes = Uint32Array.from([0x41, 0x42, 0x43, 0x44, 0x45, 0x410, 0x411, 0x412, 0x413, 0x414, 0x415, 0x1f600])
+  const groups = groupByBlock(codes)
+  const layout = layoutGrid(groups, 4, 20, 50)
+  const move = (group: number, index: number, key: 'left' | 'right' | 'up' | 'down') => moveInGrid(layout, groups, { group, index }, key)
+  // From column 2 of the short last Latin row (index 4 is column 0): down into Cyrillic column 0.
+  assert.deepEqual(move(0, 4, 'down'), { group: 1, index: 0 })
+  // Column 2 of Latin row 1 → column 2 of the next row would be past its one cell: the last cell.
+  assert.deepEqual(move(0, 2, 'down'), { group: 0, index: 4 })
+  // Up from Cyrillic column 3 lands on the short Latin row's last cell, not 4 cells back.
+  assert.deepEqual(move(1, 3, 'up'), { group: 0, index: 4 })
+  // Down from Cyrillic column 3 of row 1 → row 2 has 2 cells: its last one.
+  assert.deepEqual(move(1, 3, 'down'), { group: 1, index: 5 })
+  assert.deepEqual(move(1, 5, 'down'), { group: 2, index: 0 })
+  assert.deepEqual(move(2, 0, 'up'), { group: 1, index: 4 })
+  assert.equal(move(0, 0, 'up'), null)
+  assert.equal(move(2, 0, 'down'), null)
+  // Left and right walk the characters in order across blocks.
+  assert.deepEqual(move(0, 4, 'right'), { group: 1, index: 0 })
+  assert.deepEqual(move(1, 0, 'left'), { group: 0, index: 4 })
+  assert.equal(move(2, 0, 'right'), null)
+  assert.equal(move(0, 0, 'left'), null)
 })
 
 test('measures coverage of sorted code points', () => {

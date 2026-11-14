@@ -2,14 +2,14 @@
 // leave their fields empty instead of failing the whole font.
 
 import { FontError } from './bytes'
-import { type Face, type FontContainer, SFNT_TRUETYPE } from './container'
+import { type Face, SFNT_TRUETYPE } from './container'
 import {
   type CharMap,
   type FeatureEntry,
   type FvarTable,
   type HeadTable,
   type HheaTable,
-  type NameRecord,
+  type NameTable,
   type Os2Table,
   type PostTable,
   parseCmap,
@@ -20,8 +20,7 @@ import {
   parseMaxp,
   parseName,
   parseOs2,
-  parsePost,
-  pickName
+  parsePost
 } from './tables'
 
 export type Outlines = 'truetype' | 'cff' | 'cff2' | 'bitmap' | 'unknown'
@@ -64,7 +63,44 @@ export type FaceInfo = {
   variable: boolean
   /** Tables whose bytes could not be read, with the reason. */
   problems: string[]
+  /** Why the face cannot be shown at all (a table it cannot do without is missing), or null. */
+  damaged: string | null
 }
+
+/**
+ * Parsed tables, shared by the faces of a collection: faces often point at the same name or cmap
+ * table, and a hostile collection may point hundreds of faces at one expensive table.
+ */
+export type TableCache = WeakMap<ArrayBufferLike, Map<string, unknown>>
+
+export function newTableCache(): TableCache {
+  return new WeakMap()
+}
+
+function cached<T>(cache: TableCache, tag: string, bytes: Uint8Array, parse: () => T): T {
+  let perBuffer = cache.get(bytes.buffer)
+  if (!perBuffer) {
+    perBuffer = new Map()
+    cache.set(bytes.buffer, perBuffer)
+  }
+  const key = `${tag}:${bytes.byteOffset}:${bytes.byteLength}`
+  if (perBuffer.has(key)) {
+    const hit = perBuffer.get(key)
+    if (hit instanceof Error) throw hit
+    return hit as T
+  }
+  try {
+    const value = parse()
+    perBuffer.set(key, value)
+    return value
+  } catch (error) {
+    perBuffer.set(key, error instanceof Error ? error : new Error(String(error)))
+    throw error
+  }
+}
+
+/** Tables a face cannot be shown without. */
+const ESSENTIAL = ['head', 'name', 'cmap']
 
 function attempt<T>(problems: string[], tag: string, read: () => T): T | null {
   try {
@@ -81,18 +117,51 @@ function describeSfntVersion(value: number): string {
   return /^[\x20-\x7e]{4}$/.test(text) ? text : `0x${value.toString(16).padStart(8, '0')}`
 }
 
-export function describeFace(face: Face, uiLanguage: string): FaceInfo {
+const EMPTY_CMAP: CharMap = { codes: new Uint32Array(0), glyphs: new Uint32Array(0), source: '', symbol: false, problems: [] }
+
+function emptyInfo(face: Face, damaged: string): FaceInfo {
+  return {
+    family: '', style: '', names: {}, outlines: 'unknown', sfntVersion: describeSfntVersion(face.sfntVersion),
+    glyphCount: null, cmap: EMPTY_CMAP, head: null, hhea: null, os2: null, post: null, axes: [], instances: [],
+    features: [], color: [], monospace: false, variable: false, problems: [damaged], damaged
+  }
+}
+
+function readNames(face: Face, problems: string[], cache: TableCache): NameTable | null {
+  const bytes = face.tables.get('name')
+  return bytes ? attempt(problems, 'name', () => cached(cache, 'name', bytes, () => parseName(bytes))) : null
+}
+
+/** The label of a face for the collection picker: reads the name table only. */
+export function faceLabel(face: Face, index: number, uiLanguage: string, cache: TableCache = newTableCache()): string {
+  if (face.error) return `#${index + 1}`
+  const names = readNames(face, [], cache)
+  const pick = (id: number) => names?.pick(id, uiLanguage) ?? null
+  const label =
+    pick(NAME_IDS.fullName) ??
+    [pick(NAME_IDS.typographicFamily) ?? pick(NAME_IDS.family), pick(NAME_IDS.typographicSubfamily) ?? pick(NAME_IDS.subfamily)]
+      .filter(Boolean)
+      .join(' ')
+  return label || `#${index + 1}`
+}
+
+export function describeFace(face: Face, uiLanguage: string, cache: TableCache = newTableCache()): FaceInfo {
+  if (face.error) {
+    return emptyInfo(face, face.error)
+  }
   const problems: string[] = []
   const table = (tag: string) => face.tables.get(tag)
   const tableNames = new Set(face.tableList.map((t) => t.tag))
+  for (const entry of face.tableList) {
+    if (entry.outside) problems.push(`${entry.tag}: its ${entry.length} bytes lie past the end of the file`)
+  }
 
-  const nameBytes = table('name')
-  const records: NameRecord[] = nameBytes ? attempt(problems, 'name', () => parseName(nameBytes)) ?? [] : []
-  const name = (id: number) => pickName(records, id, uiLanguage)
-  const names: Partial<Record<NameKey, string>> = {}
+  const names = readNames(face, problems, cache)
+  const name = (id: number) => names?.pick(id, uiLanguage) ?? null
+  const nameValues: Partial<Record<NameKey, string>> = {}
   for (const [key, id] of Object.entries(NAME_IDS) as [NameKey, number][]) {
     const value = name(id)
-    if (value) names[key] = value
+    if (value) nameValues[key] = value
   }
 
   const headBytes = table('head')
@@ -106,12 +175,14 @@ export function describeFace(face: Face, uiLanguage: string): FaceInfo {
   const postBytes = table('post')
   const post = postBytes ? attempt(problems, 'post', () => parsePost(postBytes)) : null
   const cmapBytes = table('cmap')
-  const cmap =
-    (cmapBytes ? attempt(problems, 'cmap', () => parseCmap(cmapBytes)) : null) ??
-    { codes: new Uint32Array(0), glyphs: new Uint32Array(0), source: '', symbol: false }
+  const cmap = (cmapBytes ? attempt(problems, 'cmap', () => cached(cache, 'cmap', cmapBytes, () => parseCmap(cmapBytes))) : null) ?? EMPTY_CMAP
+  problems.push(...cmap.problems)
 
   const fvarBytes = table('fvar')
-  const fvar: FvarTable | null = fvarBytes ? attempt(problems, 'fvar', () => parseFvar(fvarBytes)) : null
+  const fvar: FvarTable | null = fvarBytes ? attempt(problems, 'fvar', () => cached(cache, 'fvar', fvarBytes, () => parseFvar(fvarBytes))) : null
+  if (fvar?.skippedInstances) {
+    problems.push(`fvar: ${fvar.skippedInstances} named instances were not read`)
+  }
   const axes: AxisInfo[] = (fvar?.axes ?? []).map((axis) => ({
     tag: axis.tag,
     name: name(axis.nameId) ?? axis.tag,
@@ -129,7 +200,7 @@ export function describeFace(face: Face, uiLanguage: string): FaceInfo {
   for (const tag of ['GSUB', 'GPOS'] as const) {
     const bytes = table(tag)
     if (!bytes) continue
-    const list: FeatureEntry[] = attempt(problems, tag, () => parseFeatureList(bytes)) ?? []
+    const list: FeatureEntry[] = attempt(problems, tag, () => cached(cache, tag, bytes, () => parseFeatureList(bytes))) ?? []
     for (const entry of list) {
       const existing = features.get(entry.tag)
       const uiName = entry.uiNameId !== null ? name(entry.uiNameId) : null
@@ -156,10 +227,23 @@ export function describeFace(face: Face, uiLanguage: string): FaceInfo {
   if (tableNames.has('sbix')) color.push('sbix')
   if (tableNames.has('CBDT')) color.push('CBDT')
 
+  const missing = ESSENTIAL.filter((tag) => !face.tables.has(tag))
+  let damaged: string | null = null
+  if (missing.length) {
+    const outside = missing.filter((tag) => face.tableList.some((t) => t.tag === tag && t.outside))
+    const absent = missing.filter((tag) => !outside.includes(tag))
+    damaged = [
+      outside.length ? `${outside.join(', ')} ${outside.length === 1 ? 'lies' : 'lie'} past the end of the file` : '',
+      absent.length ? `the font has no ${absent.join(', ')} table` : ''
+    ]
+      .filter(Boolean)
+      .join('; ')
+  }
+
   return {
-    family: names.typographicFamily ?? names.family ?? '',
-    style: names.typographicSubfamily ?? names.subfamily ?? '',
-    names,
+    family: nameValues.typographicFamily ?? nameValues.family ?? '',
+    style: nameValues.typographicSubfamily ?? nameValues.subfamily ?? '',
+    names: nameValues,
     outlines,
     sfntVersion: describeSfntVersion(face.sfntVersion),
     glyphCount,
@@ -174,17 +258,7 @@ export function describeFace(face: Face, uiLanguage: string): FaceInfo {
     color,
     monospace: post?.isFixedPitch ?? false,
     variable: tableNames.has('fvar') && axes.length > 0,
-    problems
+    problems,
+    damaged
   }
-}
-
-/** A short label for a face of a collection: "Menlo Bold". */
-export function faceLabel(info: FaceInfo, index: number): string {
-  const label = info.names.fullName ?? [info.family, info.style].filter(Boolean).join(' ')
-  return label || `#${index + 1}`
-}
-
-/** Opens every face; one damaged face does not hide the others. */
-export function describeContainer(container: FontContainer, uiLanguage: string): FaceInfo[] {
-  return container.faces.map((face) => describeFace(face, uiLanguage))
 }

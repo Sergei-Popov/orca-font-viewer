@@ -17,7 +17,7 @@ import {
   utf8Bytes
 } from '../font/chars'
 import type { FaceInfo } from '../font/info'
-import { type BlockGroup, type GridLayout, groupByBlock, layoutGrid, rowOf, visibleRange } from '../grid'
+import { type BlockGroup, type GridLayout, type GridMove, type GridPosition, groupByBlock, layoutGrid, moveInGrid, rowOf, visibleRange } from '../grid'
 import { type Language, type Strings, fill } from '../i18n'
 import { icon } from '../icons'
 import { append, copyText, h, html, selectText, toast } from './dom'
@@ -260,28 +260,17 @@ export class CharactersTab {
     )
   }
 
-  /** Position of `code` in the filtered list; -1 when it is filtered out. */
-  private findCode(code: number): number {
-    let offset = 0
-    for (const group of this.groups) {
-      const index = binarySearch(group.codes, code)
-      if (index >= 0) return offset + index
-      offset += group.codes.length
+  /** Where `code` is in the filtered grid, or null when it is filtered out. */
+  private positionOf(code: number): GridPosition | null {
+    for (let group = 0; group < this.groups.length; group++) {
+      const index = binarySearch(this.groups[group].codes, code)
+      if (index >= 0) return { group, index }
     }
-    return -1
+    return null
   }
 
   private hasCode(code: number): boolean {
     return this.info ? binarySearch(this.info.cmap.codes, code) >= 0 : false
-  }
-
-  private codeAt(position: number): number | null {
-    let offset = 0
-    for (const group of this.groups) {
-      if (position < offset + group.codes.length) return group.codes[position - offset]
-      offset += group.codes.length
-    }
-    return null
   }
 
   private select(code: number | null, reveal: boolean): void {
@@ -312,24 +301,19 @@ export class CharactersTab {
     if (this.layout.total === 0) return
     // The detail panel may have just appeared and narrowed the grid.
     if (this.columnsFor() !== this.columns) this.relayout()
-    const step: Record<string, number> = {
-      ArrowLeft: -1,
-      ArrowRight: 1,
-      ArrowUp: -this.columns,
-      ArrowDown: this.columns
-    }
+    const moves: Record<string, GridMove> = { ArrowLeft: 'left', ArrowRight: 'right', ArrowUp: 'up', ArrowDown: 'down' }
     if (event.key === 'Escape' && this.state.selected !== null) {
       this.select(null, false)
       event.preventDefault()
       return
     }
-    const delta = step[event.key]
-    if (delta === undefined) return
+    const move = moves[event.key]
+    if (!move) return
     event.preventDefault()
-    const current = this.state.selected === null ? -1 : this.findCode(this.state.selected)
-    const next = current < 0 ? 0 : Math.max(0, Math.min(this.layout.total - 1, current + delta))
-    const code = this.codeAt(next)
-    if (code !== null) this.select(code, true)
+    const from = this.state.selected === null ? null : this.positionOf(this.state.selected)
+    const to = from ? moveInGrid(this.layout, this.groups, from, move) : { group: 0, index: 0 }
+    const code = to ? this.groups[to.group]?.codes[to.index] : undefined
+    if (code !== undefined) this.select(code, true)
   }
 
   private renderDetail(): void {

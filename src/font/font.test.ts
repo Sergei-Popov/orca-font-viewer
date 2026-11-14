@@ -95,7 +95,7 @@ test('reads every face of a collection and rebuilds one as a standalone font', (
   const font = openFont(ttcFixture)
   assert.equal(font.collection, true)
   assert.equal(font.faces.length, 2)
-  const labels = font.faces.map((face, i) => faceLabel(describeFace(face, 'en'), i))
+  const labels = font.faces.map((face, i) => faceLabel(face, i, 'en'))
   assert.deepEqual(labels, ['Fixture Sans Regular', 'Fixture Mono Bold'])
   const single = faceToSfnt(font.faces[1])
   assert.equal(sniffFlavor(single), 'sfnt')

@@ -20,7 +20,7 @@ Three tabs:
 - **Characters** — every character the font maps, grouped by Unicode block. Search by the
   character itself, a code point (`U+0416`, `0x416`), a range (`U+0400-04FF`) or a block name;
   click a character (or move with the arrow keys) to see it large on the font's baseline with
-  its code point as `U+0416`, decimal, HTML `&#x416;`, CSS `\416`, JavaScript `Ж` and UTF-8
+  its code point as `U+0416`, decimal, HTML `&#x416;`, CSS `\416`, JavaScript `\u0416` and UTF-8
   bytes, each with a copy button. Fonts with tens of thousands of characters stay fast: only the
   rows on screen are drawn.
 - **Info** — names (family, style, version, designer, vendor, copyright, licence; links open in
@@ -34,8 +34,8 @@ header show the format, outlines, variable, colour, monospace, glyph and charact
 that is not a font, or is damaged, gets a message saying so; if Chromium refuses to draw a font
 that the viewer can still read, the Info and Characters tabs keep working and a notice says why.
 
-It is read-only and offline: no capabilities, no network, the file is never modified. English and
-Russian UI, Orca's light and dark themes.
+It is read-only and offline: no capabilities, no network, the file is never modified. The UI
+follows Orca's language (English or Russian) and its light and dark themes.
 
 **Size limit.** Orca sends at most 64 MB to a plugin editor and shows its own notice for larger
 files.
@@ -81,20 +81,6 @@ orca plugin shot local.font-viewer --editor "$PWD/path/to/font.ttf"   # PNG of t
 
 Branches follow git-flow: `feature/*` from `develop`, releases through `release/x.y.z` into
 `main`, tagged `vX.Y.Z`. Only the maintainers push and open pull requests.
-
----
-
-**По-русски.** Шрифты во вкладках Orca — из дерева файлов, по ссылке из чата агента или через
-`orca file open`. `.ttf`, `.otf`, `.woff`, `.woff2`, `.ttc` и `.otc` открываются просмотрщиком
-сразу. **Просмотр**: свой текст любого кегля от 8 до 200 px, интерлиньяж, кегли от 12 до 96,
-алфавиты, которые есть в шрифте; для вариативных шрифтов — ползунки осей и именованные стили,
-переключатели функций OpenType (лигатуры, капитель, цифры, стилистические наборы).
-**Символы**: все символы шрифта по блокам Юникода, поиск по символу, коду `U+0416`, диапазону
-или названию блока, карточка символа с кодом в форматах U+, HTML, CSS, JavaScript и UTF-8 и
-кнопками копирования. **Сведения**: названия, метрики, насыщенность и ширина, лицензия и права на
-встраивание, формат, даты и таблицы. Для коллекций есть выбор начертания. Только чтение, без
-сети; русский и английский интерфейс, светлая и тёмная темы. Лимит Orca для редакторов плагинов —
-64 МБ.
 
 ## License
 

@@ -88,3 +88,37 @@ export function visibleRange(layout: GridLayout, scrollTop: number, viewport: nu
 export function rowOf(layout: GridLayout, group: number, index: number): number {
   return layout.rows.findIndex((row) => row.kind === 'cells' && row.group === group && index >= row.from && index < row.to)
 }
+
+export type GridPosition = { group: number; index: number }
+export type GridMove = 'left' | 'right' | 'up' | 'down'
+
+/**
+ * The cell an arrow key leads to: left and right step through the characters in order, across
+ * blocks; up and down go to the row above or below and keep the column (the last cell of a
+ * shorter row), skipping block headers. Null at the edges.
+ */
+export function moveInGrid(layout: GridLayout, groups: readonly BlockGroup[], from: GridPosition, move: GridMove): GridPosition | null {
+  if (move === 'left' || move === 'right') {
+    const step = move === 'right' ? 1 : -1
+    let { group, index } = from
+    index += step
+    while (group >= 0 && group < groups.length && (index < 0 || index >= groups[group].codes.length)) {
+      group += step
+      if (group < 0 || group >= groups.length) return null
+      index = step > 0 ? 0 : groups[group].codes.length - 1
+    }
+    return group >= 0 && group < groups.length ? { group, index } : null
+  }
+  const current = rowOf(layout, from.group, from.index)
+  if (current < 0) return null
+  const row = layout.rows[current]
+  if (row.kind !== 'cells') return null
+  const column = from.index - row.from
+  const step = move === 'down' ? 1 : -1
+  for (let i = current + step; i >= 0 && i < layout.rows.length; i += step) {
+    const next = layout.rows[i]
+    if (next.kind !== 'cells') continue
+    return { group: next.group, index: Math.min(next.from + column, next.to - 1) }
+  }
+  return null
+}

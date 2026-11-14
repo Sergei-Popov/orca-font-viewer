@@ -4,7 +4,7 @@ import { type FontContainer, faceToSfnt } from './font/container'
 import { featureSettings, variationSettings } from './font/features'
 import type { FaceInfo } from './font/info'
 
-export type RenderSource = { kind: 'bytes'; bytes: Uint8Array } | { kind: 'woff2-collection' }
+export type RenderSource = { kind: 'bytes'; bytes: Uint8Array } | { kind: 'woff2-collection' } | { kind: 'error'; message: string }
 
 /**
  * A single font file is drawn as it is (Chromium reads WOFF and WOFF2 itself). A face of a

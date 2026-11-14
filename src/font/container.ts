@@ -17,6 +17,8 @@ export type TableInfo = {
   stored?: number
   /** WOFF2 transformed it (glyf, loca, hmtx); its bytes are not available. */
   transformed?: boolean
+  /** The directory places it (partly) past the end of the file, as in a file cut short. */
+  outside?: boolean
 }
 
 export type Face = {
@@ -24,7 +26,20 @@ export type Face = {
   sfntVersion: number
   tables: Map<string, Uint8Array>
   tableList: TableInfo[]
+  /** Why this face of a collection cannot be read; the other faces still open. */
+  error?: string
 }
+
+/** Bounds on what a file may make the parser allocate; tests pass small ones. */
+export type Limits = {
+  /** Most bytes a WOFF or WOFF 2.0 file may unpack to. */
+  maxUnpackedBytes: number
+}
+
+export const DEFAULT_LIMITS: Limits = { maxUnpackedBytes: 256 * 1024 * 1024 }
+
+/** Faces a collection may list; real ones have a few dozen at most. */
+const MAX_FACES = 10000
 
 export type FontContainer = {
   flavor: Flavor
@@ -58,7 +73,7 @@ export function sniffFlavor(bytes: Uint8Array): (Flavor | 'collection') | null {
   return null
 }
 
-export function openFont(bytes: Uint8Array): FontContainer {
+export function openFont(bytes: Uint8Array, limits: Limits = DEFAULT_LIMITS): FontContainer {
   const kind = sniffFlavor(bytes)
   switch (kind) {
     case 'sfnt':
@@ -66,9 +81,9 @@ export function openFont(bytes: Uint8Array): FontContainer {
     case 'collection':
       return readCollection(bytes)
     case 'woff':
-      return readWoff(bytes)
+      return readWoff(bytes, limits)
     case 'woff2':
-      return readWoff2(bytes)
+      return readWoff2(bytes, limits)
     default:
       throw new FontError('not-a-font', 'the file does not start with a font signature')
   }
@@ -89,32 +104,67 @@ function readSfntFace(bytes: Uint8Array, offset: number): Face {
     const tag = r.tag(record)
     const tableOffset = r.u32(record + 8)
     const length = r.u32(record + 12)
-    tableList.push({ tag, length })
     if (r.has(tableOffset, length)) {
+      tableList.push({ tag, length })
       tables.set(tag, r.slice(tableOffset, length))
+    } else {
+      tableList.push({ tag, length, outside: true })
     }
   }
   return { sfntVersion, tables, tableList }
 }
 
+/** A face that could not be read, kept so the collection's numbering stays right. */
+function brokenFace(error: unknown): Face {
+  const message = error instanceof FontError ? error.message : String(error)
+  return { sfntVersion: 0, tables: new Map(), tableList: [], error: message }
+}
+
 function readCollection(bytes: Uint8Array): FontContainer {
   const r = new Reader(bytes)
   const numFonts = r.u32(8)
-  if (numFonts === 0 || numFonts > 10000) {
+  if (numFonts === 0 || numFonts > MAX_FACES || !r.has(12, numFonts * 4)) {
     throw new FontError('damaged', `collection lists ${numFonts} fonts`)
   }
+  // Faces that share a directory share one Face: a file cannot multiply its work by repeating offsets.
+  const byOffset = new Map<number, Face>()
   const faces: Face[] = []
   for (let i = 0; i < numFonts; i++) {
-    faces.push(readSfntFace(bytes, r.u32(12 + i * 4)))
+    const offset = r.u32(12 + i * 4)
+    let face = byOffset.get(offset)
+    if (!face) {
+      try {
+        face = readSfntFace(bytes, offset)
+      } catch (error) {
+        face = brokenFace(error)
+      }
+      byOffset.set(offset, face)
+    }
+    faces.push(face)
+  }
+  if (faces.every((face) => face.error)) {
+    throw new FontError('damaged', `no face of the collection can be read: ${faces[0].error}`)
   }
   return { flavor: 'sfnt', collection: true, faces, fileSize: bytes.byteLength }
 }
 
-function readWoff(bytes: Uint8Array): FontContainer {
+function readWoff(bytes: Uint8Array, limits: Limits): FontContainer {
   const r = new Reader(bytes)
   const sfntVersion = r.u32(4)
   const numTables = r.u16(12)
+  const totalSfntSize = r.u32(16)
   const metaLength = r.u32(28)
+  if (totalSfntSize > limits.maxUnpackedBytes) {
+    throw new FontError('damaged', `the WOFF file unpacks to ${totalSfntSize} bytes, more than ${limits.maxUnpackedBytes}`)
+  }
+  // Check the whole directory before inflating anything: the sizes must add up to the font.
+  let total = 12 + numTables * 16
+  for (let i = 0; i < numTables; i++) {
+    total += r.u32(44 + i * 20 + 12)
+    if (total > totalSfntSize) {
+      throw new FontError('damaged', `the WOFF tables add up to more than the ${totalSfntSize} bytes the header gives`)
+    }
+  }
   const tables = new Map<string, Uint8Array>()
   const tableList: TableInfo[] = []
   for (let i = 0; i < numTables; i++) {
@@ -130,6 +180,9 @@ function readWoff(bytes: Uint8Array): FontContainer {
         data = unzlibSync(stored, { out: new Uint8Array(origLength) })
       } catch (error) {
         throw new FontError('damaged', `table ${tag} does not inflate: ${String(error)}`)
+      }
+      if (data.byteLength !== origLength) {
+        throw new FontError('damaged', `table ${tag} inflates to ${data.byteLength} bytes, not ${origLength}`)
       }
     } else {
       data = stored
@@ -216,7 +269,7 @@ class Cursor {
 
 type Woff2Entry = { tag: string; origLength: number; transformLength: number; transformed: boolean }
 
-function readWoff2(bytes: Uint8Array): FontContainer {
+function readWoff2(bytes: Uint8Array, limits: Limits): FontContainer {
   const r = new Reader(bytes)
   const flavor = r.u32(4)
   const numTables = r.u16(12)
@@ -260,9 +313,13 @@ function readWoff2(bytes: Uint8Array): FontContainer {
 
   const compressed = r.slice(cursor.offset, totalCompressedSize)
   const expected = entries.reduce((sum, e) => sum + e.transformLength, 0)
+  if (expected > limits.maxUnpackedBytes) {
+    throw new FontError('damaged', `the WOFF2 tables add up to ${expected} bytes, more than ${limits.maxUnpackedBytes}`)
+  }
   let stream: Uint8Array
   try {
-    stream = brotliDecompress(compressed, expected)
+    // The decoder stops as soon as the stream would run past what the directory announced.
+    stream = brotliDecompress(compressed, expected, expected)
   } catch (error) {
     throw new FontError('damaged', `the WOFF2 data does not decompress: ${String(error)}`)
   }
@@ -284,7 +341,7 @@ function readWoff2(bytes: Uint8Array): FontContainer {
     for (const index of indices) {
       const entry = entries[index]
       if (!entry) {
-        throw new FontError('damaged', `collection face refers to table ${index} of ${entries.length}`)
+        return brokenFace(`the face refers to table ${index} of ${entries.length}`)
       }
       const bytesOfTable = data[index]
       if (bytesOfTable) {
@@ -298,6 +355,9 @@ function readWoff2(bytes: Uint8Array): FontContainer {
     }
     return { sfntVersion, tables, tableList }
   })
+  if (faces.every((face) => face.error)) {
+    throw new FontError('damaged', `no face of the file can be read: ${faces[0].error}`)
+  }
 
   return {
     flavor: 'woff2',
@@ -310,7 +370,8 @@ function readWoff2(bytes: Uint8Array): FontContainer {
 
 /**
  * A standalone sfnt with one face's tables, for faces of a collection: Chromium's FontFace loads
- * only single fonts. Tables are copied in tag order, 4-byte aligned, with their checksums.
+ * only single fonts. Tables are copied in tag order, 4-byte aligned, with their checksums; head's
+ * checkSumAdjustment is zeroed for its checksum and then set for the new file, as the spec says.
  */
 export function faceToSfnt(face: Face): Uint8Array {
   const tags = [...face.tables.keys()].sort()
@@ -330,6 +391,7 @@ export function faceToSfnt(face: Face): Uint8Array {
   view.setUint16(8, entrySelector)
   view.setUint16(10, numTables * 16 - searchRange)
   let offset = headerSize
+  let headAt = -1
   tags.forEach((tag, i) => {
     const table = face.tables.get(tag)!
     const record = 12 + i * 16
@@ -337,11 +399,18 @@ export function faceToSfnt(face: Face): Uint8Array {
       view.setUint8(record + c, tag.charCodeAt(c))
     }
     out.set(table, offset)
+    if (tag === 'head' && table.byteLength >= 12) {
+      view.setUint32(offset + 8, 0)
+      headAt = offset
+    }
     view.setUint32(record + 4, checksum(out.subarray(offset, offset + align4(table.byteLength))))
     view.setUint32(record + 8, offset)
     view.setUint32(record + 12, table.byteLength)
     offset += align4(table.byteLength)
   })
+  if (headAt >= 0) {
+    view.setUint32(headAt + 8, (0xb1b0afba - checksum(out)) >>> 0)
+  }
   return out
 }
 

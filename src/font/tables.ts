@@ -6,6 +6,7 @@ import { FontError, Reader } from './bytes'
 // ---------------------------------------------------------------------------------------------
 // name
 
+/** One name record; its string is decoded only when the viewer asks for it. */
 export type NameRecord = {
   platformId: number
   encodingId: number
@@ -13,7 +14,9 @@ export type NameRecord = {
   nameId: number
   /** BCP-47-ish language of the record when known ("en", "ru", "ja"), else "". */
   language: string
-  value: string
+  /** Where the string lies in the table's storage. */
+  offset: number
+  length: number
 }
 
 const MAC_ROMAN_HIGH =
@@ -21,19 +24,25 @@ const MAC_ROMAN_HIGH =
   '¿¡¬√ƒ≈∆«»… ÀÃÕŒœ–—“”‘’÷◊ÿŸ⁄€‹›ﬁﬂ‡·‚„‰ÂÊÁËÈÍÎÏÌÓÔÒÚÛÙıˆ˜¯˘˙˚¸˝˛ˇ'
 
 function decodeMacRoman(bytes: Uint8Array): string {
-  let out = ''
-  for (const byte of bytes) {
-    out += byte < 0x80 ? String.fromCharCode(byte) : MAC_ROMAN_HIGH[byte - 0x80]
+  const chars: string[] = new Array(bytes.byteLength)
+  for (let i = 0; i < bytes.byteLength; i++) {
+    const byte = bytes[i]
+    chars[i] = byte < 0x80 ? String.fromCharCode(byte) : MAC_ROMAN_HIGH[byte - 0x80]
   }
-  return out
+  return chars.join('')
 }
 
+const utf16 = new TextDecoder('utf-16be')
+
 function decodeUtf16(bytes: Uint8Array): string {
-  let out = ''
-  for (let i = 0; i + 1 < bytes.byteLength; i += 2) {
-    out += String.fromCharCode((bytes[i] << 8) | bytes[i + 1])
-  }
-  return out
+  return utf16.decode(bytes.subarray(0, bytes.byteLength & ~1))
+}
+
+/** Drops trailing NULs; a loop, because /\u0000+$/ is quadratic on long runs of NULs. */
+export function trimNuls(text: string): string {
+  let end = text.length
+  while (end > 0 && text.charCodeAt(end - 1) === 0) end--
+  return end === text.length ? text : text.slice(0, end)
 }
 
 /** Primary language subtags of Windows LCIDs (low 10 bits). */
@@ -52,20 +61,105 @@ const MAC_LANGUAGES: Record<number, string> = {
   23: 'ko', 25: 'pl', 26: 'hu', 32: 'ru', 33: 'zh'
 }
 
-export function parseName(bytes: Uint8Array): NameRecord[] {
+/** Records a name lookup tries before giving up on blank strings. */
+const MAX_TRIES = 8
+/** Language tags are short; a longer one is cut, not decoded whole. */
+const MAX_TAG_BYTES = 64
+
+/**
+ * A name table: records indexed by name id; strings are decoded on demand, once per (encoding,
+ * offset, length), so a table of thousands of records sharing one long string stays cheap.
+ */
+export class NameTable {
+  private readonly byId = new Map<number, NameRecord[]>()
+  private readonly strings = new Map<string, string>()
+  private readonly picked = new Map<string, string | null>()
+  readonly size: number
+
+  constructor(
+    private readonly reader: Reader,
+    private readonly storage: number,
+    records: NameRecord[]
+  ) {
+    this.size = records.length
+    for (const record of records) {
+      const list = this.byId.get(record.nameId)
+      if (list) list.push(record)
+      else this.byId.set(record.nameId, [record])
+    }
+  }
+
+  /** How many distinct strings were decoded so far (records sharing storage share one). */
+  get decodedStrings(): number {
+    return this.strings.size
+  }
+
+  /** The decoded string of a record, without trailing NULs. */
+  text(record: NameRecord): string {
+    const mac = record.platformId === 1
+    const key = `${mac ? 'm' : 'u'}:${record.offset}:${record.length}`
+    let value = this.strings.get(key)
+    if (value === undefined) {
+      const raw = this.reader.slice(this.storage + record.offset, record.length)
+      value = trimNuls(mac ? decodeMacRoman(raw) : decodeUtf16(raw))
+      this.strings.set(key, value)
+    }
+    return value
+  }
+
+  /**
+   * The best string for `nameId`: the UI language first, then English, then anything, preferring
+   * Windows/Unicode records over Mac ones at each step; blank strings are skipped.
+   */
+  pick(nameId: number, uiLanguage: string): string | null {
+    const ui = uiLanguage.toLowerCase().split('-')[0]
+    const cacheKey = `${nameId}:${ui}`
+    const cached = this.picked.get(cacheKey)
+    if (cached !== undefined) return cached
+    const candidates = (this.byId.get(nameId) ?? []).map((record, order) => {
+      const lang = record.language.split('-')[0]
+      let score = record.platformId === 1 ? 0 : 1
+      if (lang === ui) score += 20
+      else if (lang === 'en') score += 10
+      else if (lang === '') score += 5
+      if (record.platformId === 3 && record.languageId === 0x0409) score += 2
+      return { record, score, order }
+    })
+    candidates.sort((a, b) => b.score - a.score || a.order - b.order)
+    let result: string | null = null
+    for (const { record } of candidates.slice(0, MAX_TRIES)) {
+      const value = this.text(record)
+      if (value.trim()) {
+        result = value
+        break
+      }
+    }
+    this.picked.set(cacheKey, result)
+    return result
+  }
+}
+
+export function parseName(bytes: Uint8Array): NameTable {
   const r = new Reader(bytes)
   const format = r.u16(0)
   const count = r.u16(2)
   const storage = r.u16(4)
-  const langTags: string[] = []
-  if (format === 1) {
-    const tagCount = r.u16(6 + count * 12)
-    for (let i = 0; i < tagCount; i++) {
-      const at = 6 + count * 12 + 2 + i * 4
-      const length = r.u16(at)
-      const offset = r.u16(at + 2)
-      langTags.push(r.has(storage + offset, length) ? decodeUtf16(r.slice(storage + offset, length)) : '')
+  // Format 1 language tags, decoded only when a record uses one.
+  const tagAt = 6 + count * 12
+  const tagCount = format === 1 && r.has(tagAt, 2) ? r.u16(tagAt) : 0
+  const tags = new Map<number, string>()
+  const tagOf = (index: number): string => {
+    let tag = tags.get(index)
+    if (tag === undefined) {
+      tag = ''
+      if (index < tagCount && r.has(tagAt + 2 + index * 4, 4)) {
+        const length = Math.min(r.u16(tagAt + 2 + index * 4), MAX_TAG_BYTES)
+        const offset = r.u16(tagAt + 4 + index * 4)
+        if (r.has(storage + offset, length)) tag = decodeUtf16(r.slice(storage + offset, length)).toLowerCase()
+      }
+      tags.set(index, tag)
     }
+    return tag
   }
   const records: NameRecord[] = []
   for (let i = 0; i < count; i++) {
@@ -76,55 +170,20 @@ export function parseName(bytes: Uint8Array): NameRecord[] {
     const nameId = r.u16(at + 6)
     const length = r.u16(at + 8)
     const offset = r.u16(at + 10)
-    if (!r.has(storage + offset, length)) {
-      continue
-    }
-    const raw = r.slice(storage + offset, length)
-    let value: string
-    if (platformId === 0 || (platformId === 3 && (encodingId === 0 || encodingId === 1 || encodingId === 10))) {
-      value = decodeUtf16(raw)
-    } else if (platformId === 1 && encodingId === 0) {
-      value = decodeMacRoman(raw)
-    } else {
-      continue
-    }
+    if (!r.has(storage + offset, length)) continue
+    const unicode = platformId === 0 || (platformId === 3 && (encodingId === 0 || encodingId === 1 || encodingId === 10))
+    if (!unicode && !(platformId === 1 && encodingId === 0)) continue
     let language = ''
     if (languageId >= 0x8000) {
-      language = (langTags[languageId - 0x8000] ?? '').toLowerCase()
+      language = tagOf(languageId - 0x8000)
     } else if (platformId === 3) {
       language = WINDOWS_LANGUAGES[languageId & 0x3ff] ?? ''
     } else if (platformId === 1) {
       language = MAC_LANGUAGES[languageId] ?? ''
     }
-    records.push({ platformId, encodingId, languageId, nameId, language, value: value.replace(/\u0000+$/, '') })
+    records.push({ platformId, encodingId, languageId, nameId, language, offset, length })
   }
-  return records
-}
-
-/**
- * The best string for `nameId`: the UI language first, then English, then anything, preferring
- * Windows/Unicode records over Mac ones at each step.
- */
-export function pickName(records: readonly NameRecord[], nameId: number, uiLanguage: string): string | null {
-  let best: NameRecord | null = null
-  let bestScore = -1
-  const ui = uiLanguage.toLowerCase().split('-')[0]
-  for (const record of records) {
-    if (record.nameId !== nameId || !record.value.trim()) {
-      continue
-    }
-    const lang = record.language.split('-')[0]
-    let score = record.platformId === 1 ? 0 : 1
-    if (lang === ui) score += 20
-    else if (lang === 'en') score += 10
-    else if (lang === '') score += 5
-    if (record.platformId === 3 && record.languageId === 0x0409) score += 2
-    if (score > bestScore) {
-      best = record
-      bestScore = score
-    }
-  }
-  return best ? best.value : null
+  return new NameTable(r, storage, records)
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -224,19 +283,49 @@ export type CharMap = {
   source: string
   /** A symbol font (Windows encoding 0): its characters sit at U+F020–F0FF. */
   symbol: boolean
+  /** Subtables that could not be read, or were cut short. */
+  problems: string[]
 }
 
-/** Grows a pair of typed arrays as code points come in. */
+const UNICODE_SIZE = 0x110000
+
+/** Thrown when a subtable makes the builder do more work than Unicode has code points. */
+class OverBudget extends Error {}
+
+/**
+ * Collects code point → glyph pairs. A code point is kept the first time it comes (a bitset
+ * drops repeats), and the work is bounded: overlapping ranges cannot make it loop or grow
+ * beyond `budget` code points.
+ */
 class MapBuilder {
-  codes = new Uint32Array(1024)
-  glyphs = new Uint32Array(1024)
-  size = 0
-  sorted = true
+  private codes = new Uint32Array(1024)
+  private glyphs = new Uint32Array(1024)
+  private readonly seen = new Uint8Array(UNICODE_SIZE >> 3)
+  private size = 0
+  private sorted = true
+
+  constructor(
+    private readonly macRoman: boolean,
+    private budget: number
+  ) {}
 
   add(code: number, glyph: number): void {
-    if (glyph === 0 || code > 0x10ffff) {
+    if (--this.budget < 0) {
+      throw new OverBudget()
+    }
+    if (this.macRoman) {
+      // A Mac Roman subtable maps single bytes; the high half is not Latin-1.
+      if (code > 0xff) return
+      if (code >= 0x80) code = MAC_ROMAN_HIGH.charCodeAt(code - 0x80)
+    }
+    if (glyph === 0 || code >= UNICODE_SIZE) {
       return
     }
+    const bit = 1 << (code & 7)
+    if (this.seen[code >> 3] & bit) {
+      return
+    }
+    this.seen[code >> 3] |= bit
     if (this.size === this.codes.length) {
       const codes = new Uint32Array(this.size * 2)
       codes.set(this.codes)
@@ -245,7 +334,7 @@ class MapBuilder {
       glyphs.set(this.glyphs)
       this.glyphs = glyphs
     }
-    if (this.size > 0 && code <= this.codes[this.size - 1]) {
+    if (this.size > 0 && code < this.codes[this.size - 1]) {
       this.sorted = false
     }
     this.codes[this.size] = code
@@ -254,21 +343,26 @@ class MapBuilder {
   }
 
   finish(): { codes: Uint32Array; glyphs: Uint32Array } {
-    let codes = this.codes.slice(0, this.size)
-    let glyphs = this.glyphs.slice(0, this.size)
-    if (!this.sorted) {
-      const order = Array.from(codes.keys()).sort((a, b) => codes[a] - codes[b] || a - b)
-      const sortedCodes: number[] = []
-      const sortedGlyphs: number[] = []
-      for (const index of order) {
-        if (sortedCodes.length && sortedCodes[sortedCodes.length - 1] === codes[index]) {
-          continue
+    const codes = this.codes.slice(0, this.size)
+    const glyphs = this.glyphs.slice(0, this.size)
+    if (this.sorted) {
+      return { codes, glyphs }
+    }
+    // Out of order: walk the bitset, which is already in code point order.
+    const glyphOf = new Uint32Array(UNICODE_SIZE)
+    for (let i = 0; i < this.size; i++) glyphOf[codes[i]] = glyphs[i]
+    let n = 0
+    for (let byte = 0; byte < this.seen.length; byte++) {
+      const bits = this.seen[byte]
+      if (!bits) continue
+      for (let b = 0; b < 8; b++) {
+        if (bits & (1 << b)) {
+          const code = (byte << 3) | b
+          codes[n] = code
+          glyphs[n] = glyphOf[code]
+          n++
         }
-        sortedCodes.push(codes[index])
-        sortedGlyphs.push(glyphs[index])
       }
-      codes = Uint32Array.from(sortedCodes)
-      glyphs = Uint32Array.from(sortedGlyphs)
     }
     return { codes, glyphs }
   }
@@ -279,11 +373,16 @@ const CMAP_PREFERENCE: [number, number][] = [
   [3, 10], [0, 6], [0, 4], [3, 1], [0, 3], [0, 2], [0, 1], [0, 0], [3, 0], [1, 0]
 ]
 
-export function parseCmap(bytes: Uint8Array): CharMap {
+/**
+ * The font's character map from its best subtable. A damaged subtable is skipped for the next
+ * best one; `budget` bounds the code points a subtable may produce (overlapping ranges in a
+ * hostile font would otherwise repeat all of Unicode many times).
+ */
+export function parseCmap(bytes: Uint8Array, budget = 2 * UNICODE_SIZE): CharMap {
   const r = new Reader(bytes)
   const numTables = r.u16(2)
   const subtables: { platform: number; encoding: number; offset: number; format: number }[] = []
-  for (let i = 0; i < numTables; i++) {
+  for (let i = 0; i < numTables && r.has(4 + i * 8, 8); i++) {
     const at = 4 + i * 8
     const platform = r.u16(at)
     const encoding = r.u16(at + 2)
@@ -299,30 +398,45 @@ export function parseCmap(bytes: Uint8Array): CharMap {
     return (index < 0 ? 100 : index * 2) - (s.format === 12 || s.format === 13 ? 1 : 0)
   }
   subtables.sort((a, b) => rank(a) - rank(b))
+  const problems: string[] = []
+  const tried = new Set<string>()
   for (const sub of subtables) {
-    const builder = new MapBuilder()
-    const ok = readSubtable(r, sub.offset, sub.format, builder, sub.platform === 1)
-    if (ok) {
+    const label = `cmap ${sub.platform}/${sub.encoding} format ${sub.format}`
+    const key = `${sub.offset}:${sub.platform === 1 && sub.encoding === 0}`
+    if (tried.has(key)) continue
+    tried.add(key)
+    const builder = new MapBuilder(sub.platform === 1 && sub.encoding === 0, budget)
+    let known: boolean
+    try {
+      known = readSubtable(r, sub.offset, sub.format, builder)
+    } catch (error) {
+      if (error instanceof OverBudget) {
+        problems.push(`${label}: its ranges overlap; reading stopped after ${budget} code points`)
+        known = true
+      } else {
+        problems.push(`${label}: ${error instanceof Error ? error.message : String(error)}`)
+        continue
+      }
+    }
+    if (known) {
       const { codes, glyphs } = builder.finish()
-      return { codes, glyphs, source: `${sub.platform}/${sub.encoding}`, symbol: sub.platform === 3 && sub.encoding === 0 }
+      return { codes, glyphs, source: `${sub.platform}/${sub.encoding}`, symbol: sub.platform === 3 && sub.encoding === 0, problems }
     }
   }
-  return { codes: new Uint32Array(0), glyphs: new Uint32Array(0), source: '', symbol: false }
+  return { codes: new Uint32Array(0), glyphs: new Uint32Array(0), source: '', symbol: false, problems }
 }
 
-function readSubtable(r: Reader, at: number, format: number, out: MapBuilder, macRoman: boolean): boolean {
+function readSubtable(r: Reader, at: number, format: number, out: MapBuilder): boolean {
   switch (format) {
     case 0: {
       for (let code = 0; code < 256; code++) {
-        const glyph = r.u8(at + 6 + code)
-        const unicode = macRoman && code >= 0x80 ? MAC_ROMAN_HIGH.charCodeAt(code - 0x80) : code
-        out.add(unicode, glyph)
+        out.add(code, r.u8(at + 6 + code))
       }
       return true
     }
     case 4: {
       const segCountX2 = r.u16(at + 6)
-      const segCount = segCountX2 / 2
+      const segCount = segCountX2 >> 1
       const endCodes = at + 14
       const startCodes = endCodes + segCountX2 + 2
       const idDeltas = startCodes + segCountX2
@@ -371,7 +485,7 @@ function readSubtable(r: Reader, at: number, format: number, out: MapBuilder, ma
       for (let g = 0; g < groups; g++) {
         const group = at + 16 + g * 12
         const start = r.u32(group)
-        const end = Math.min(r.u32(group + 4), 0x10ffff)
+        const end = Math.min(r.u32(group + 4), UNICODE_SIZE - 1)
         const glyph = r.u32(group + 8)
         for (let code = start; code <= end; code++) {
           out.add(code, format === 12 ? glyph + (code - start) : glyph)
@@ -389,9 +503,21 @@ function readSubtable(r: Reader, at: number, format: number, out: MapBuilder, ma
 
 export type Axis = { tag: string; min: number; default: number; max: number; hidden: boolean; nameId: number }
 export type NamedInstance = { nameId: number; postScriptNameId: number | null; coordinates: Record<string, number> }
-export type FvarTable = { axes: Axis[]; instances: NamedInstance[] }
+export type FvarTable = {
+  axes: Axis[]
+  instances: NamedInstance[]
+  /** Instances that were not read: past the end of the table or over the work limit. */
+  skippedInstances: number
+}
 
-export function parseFvar(bytes: Uint8Array): FvarTable {
+/** More axes than any real font has; each one becomes a slider. */
+const MAX_AXES = 64
+
+/**
+ * The variation axes and named instances. Record sizes are checked against the spec (an instance
+ * is 4 + 4·axes bytes, or 6 more with a PostScript name id) and `maxWork` bounds instances × axes.
+ */
+export function parseFvar(bytes: Uint8Array, maxWork = 65536): FvarTable {
   const r = new Reader(bytes)
   const axesOffset = r.u16(4)
   const axisCount = r.u16(8)
@@ -400,6 +526,16 @@ export function parseFvar(bytes: Uint8Array): FvarTable {
   const instanceSize = r.u16(14)
   if (axisSize < 20) {
     throw new FontError('damaged', `fvar axis records of ${axisSize} bytes`)
+  }
+  if (axisCount > MAX_AXES) {
+    throw new FontError('damaged', `fvar lists ${axisCount} axes, more than ${MAX_AXES}`)
+  }
+  if (!r.has(axesOffset, axisCount * axisSize)) {
+    throw new FontError('damaged', `fvar axis records run past the end of the table`)
+  }
+  const plainSize = 4 + axisCount * 4
+  if (instanceCount > 0 && instanceSize !== plainSize && instanceSize !== plainSize + 2) {
+    throw new FontError('damaged', `fvar instance records of ${instanceSize} bytes for ${axisCount} axes`)
   }
   const axes: Axis[] = []
   for (let i = 0; i < axisCount; i++) {
@@ -413,22 +549,24 @@ export function parseFvar(bytes: Uint8Array): FvarTable {
       nameId: r.u16(at + 18)
     })
   }
-  const instances: NamedInstance[] = []
   const instancesAt = axesOffset + axisCount * axisSize
-  for (let i = 0; i < instanceCount; i++) {
+  const fit = instanceSize > 0 ? Math.max(0, Math.floor((r.length - instancesAt) / instanceSize)) : 0
+  const readable = Math.min(instanceCount, fit, Math.floor(maxWork / Math.max(1, axisCount)))
+  const hasPsName = instanceSize === plainSize + 2
+  const instances: NamedInstance[] = []
+  for (let i = 0; i < readable; i++) {
     const at = instancesAt + i * instanceSize
     const coordinates: Record<string, number> = {}
     axes.forEach((axis, a) => {
       coordinates[axis.tag] = r.fixed(at + 4 + a * 4)
     })
-    const hasPsName = instanceSize >= axisCount * 4 + 6
     instances.push({
       nameId: r.u16(at),
       postScriptNameId: hasPsName ? r.u16(at + 4 + axisCount * 4) : null,
       coordinates
     })
   }
-  return { axes, instances }
+  return { axes, instances, skippedInstances: instanceCount - readable }
 }
 
 // ---------------------------------------------------------------------------------------------

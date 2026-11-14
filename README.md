@@ -37,7 +37,7 @@ that the viewer can still read, the Info and Characters tabs keep working and a 
 It is read-only and offline: no capabilities, no network, the file is never modified. The UI
 follows Orca's language (English or Russian) and its light and dark themes.
 
-**Size limit.** Orca sends at most 64 MB to a plugin editor and shows its own notice for larger
+**Size limit.** Orca sends at most 64 MiB to a plugin editor and shows its own notice for larger
 files.
 
 ## Install

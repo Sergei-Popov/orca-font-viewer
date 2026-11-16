@@ -1,0 +1,223 @@
+{
+  "accent": "#14B8A6",
+  "title": [
+    "Font",
+    "Viewer"
+  ],
+  "icon": "images/icon.png",
+  "cover": {
+    "out": "images/cover.png",
+    "alt": "Font Viewer on a variable font: your own text as a large sample at 72 px in a heavy, casual style, under the size controls.",
+    "tagline": "See any font file: axes, features and every glyph.",
+    "chips": [
+      ".ttf",
+      ".otf",
+      ".woff2",
+      ".ttc",
+      "Variable"
+    ],
+    "chipMain": 0,
+    "stage": {
+      "file": ".orca/listing/samples/Recursive_VF_1.085.ttf",
+      "theme": "dark",
+      "scale": 2,
+      "width": 440,
+      "height": 440,
+      "waitFor": {
+        "noText": "Reading the font…"
+      },
+      "act": [
+        {
+          "fill": "Weight (wght)",
+          "value": "800"
+        },
+        {
+          "fill": "Casual (CASL)",
+          "value": "1"
+        },
+        {
+          "fill": "Line height",
+          "value": "1.1"
+        },
+        {
+          "clickLabel": "Type here to try your own text"
+        },
+        {
+          "key": "a",
+          "modifiers": [
+            "meta"
+          ]
+        },
+        {
+          "type": "Sphinx of black quartz, judge my vow"
+        },
+        {
+          "clickText": "72"
+        },
+        {
+          "wheel": [
+            432,
+            300,
+            -4000
+          ]
+        },
+        {
+          "hover": [
+            400,
+            50
+          ]
+        }
+      ],
+      "origin": {
+        "x": 0,
+        "y": 0
+      }
+    }
+  },
+  "screenshots": [
+    {
+      "out": "images/shot-1-variable-axes.png",
+      "headline": "Move every variable axis, live",
+      "alt": "Variable axes at work: weight 800, Casual 1 and slant -15 on the sample text; the named instance reads Custom.",
+      "stage": {
+        "file": ".orca/listing/samples/Recursive_VF_1.085.ttf",
+        "waitFor": {
+          "noText": "Reading the font…"
+        },
+        "act": [
+          {
+            "fill": "Weight (wght)",
+            "value": "800"
+          },
+          {
+            "fill": "Casual (CASL)",
+            "value": "1"
+          },
+          {
+            "fill": "Slant (slnt)",
+            "value": "-15"
+          },
+          {
+            "click": [
+              480,
+              371
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "out": "images/shot-2-opentype-features.png",
+      "headline": "Switch OpenType features on your text",
+      "alt": "Code ligatures switched on in a monospaced font: the dlig feature checked and != => >= drawn as single glyphs.",
+      "stage": {
+        "file": ".orca/listing/samples/Recursive_VF_1.085.ttf",
+        "waitFor": {
+          "noText": "Reading the font…"
+        },
+        "act": [
+          {
+            "fill": "Monospace (MONO)",
+            "value": "1"
+          },
+          {
+            "fill": "Size",
+            "value": "48"
+          },
+          {
+            "clickLabel": "Type here to try your own text"
+          },
+          {
+            "key": "a",
+            "modifiers": [
+              "meta"
+            ]
+          },
+          {
+            "type": "a != b && c => d >= e"
+          },
+          {
+            "clickText": "Discretionary ligatures"
+          },
+          {
+            "wheel": [
+              600,
+              215,
+              26
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "out": "images/shot-3-characters.png",
+      "headline": "Every glyph, by Unicode block",
+      "alt": "A CJK font with 47,336 glyphs by Unicode block: 20,992 CJK Unified Ideographs, one selected with its code point to copy.",
+      "stage": {
+        "file": ".orca/listing/samples/LXGWWenKai-Regular.ttf",
+        "waitFor": {
+          "noText": "Reading the font…"
+        },
+        "act": [
+          {
+            "clickText": "Characters"
+          },
+          {
+            "select": "Block",
+            "option": "CJK Unified Ideographs ("
+          },
+          {
+            "clickLabel": "U+4E2D"
+          },
+          {
+            "hover": [
+              613,
+              137
+            ]
+          }
+        ]
+      }
+    },
+    {
+      "out": "images/shot-4-collection.png",
+      "headline": "Every face of a font collection",
+      "alt": "A .ttc font collection with face 33 of 36 picked in Face: its name, style and 2,937 glyphs, previewed on the sample.",
+      "stage": {
+        "file": ".orca/listing/samples/Inter.ttc",
+        "waitFor": {
+          "noText": "Reading the font…"
+        },
+        "act": [
+          {
+            "select": "Face",
+            "option": "Inter Display Bold"
+          }
+        ]
+      }
+    },
+    {
+      "out": "images/shot-5-info.png",
+      "headline": "Licence, embedding rights and metrics",
+      "alt": "The Info tab: vertical metrics and variable axes, then the OFL licence and its embedding rights. Shown in Orca's light theme.",
+      "stage": {
+        "file": ".orca/listing/samples/InterVariable.ttf",
+        "theme": "light",
+        "waitFor": {
+          "noText": "Reading the font…"
+        },
+        "act": [
+          {
+            "clickText": "Info"
+          },
+          {
+            "wheel": [
+              480,
+              300,
+              481
+            ]
+          }
+        ]
+      }
+    }
+  ]
+}

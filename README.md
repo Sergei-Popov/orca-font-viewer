@@ -77,7 +77,10 @@ orca plugin shot local.font-viewer --editor "$PWD/path/to/font.ttf"   # PNG of t
 - `src/describe.ts`, `src/grid.ts`, `src/render.ts` — pure helpers for the view, tested in
   `src/view-logic.test.ts` and `src/render.test.ts`.
 - `tools/` — generators for the block table, the Brotli dictionary word list and the icons
-  (`make-icons.py` draws "Aa" from STIXGeneral, OFL; `rasterize-icons.sh` makes the PNGs).
+  (`make-icons.py` draws "Aa" from STIXGeneral, OFL; `rasterize-icons.sh` makes the PNGs), and
+  the listing images: `listing.json` is the spec for the hub's `scripts/listing-image.sh`, and
+  `listing-samples.sh` downloads the OFL demo fonts (Recursive, LXGW WenKai, Inter) at pinned
+  sha256s into git-ignored folders.
 - `vendor/` — [fflate](https://github.com/101arrowz/fflate) 0.8.3 (MIT) for WOFF 1.0 and
   [brotli.js](https://github.com/devongovett/brotli.js) 2.1.0 (MIT, Google's decoder Apache-2.0)
   for WOFF 2.0; see `vendor/README.md`.

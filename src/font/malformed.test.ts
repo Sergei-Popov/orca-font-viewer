@@ -4,10 +4,11 @@
 import { assert, test } from 'orca/testing'
 import { loadBrotliDictionary } from './brotli-dictionary'
 import { FontError } from './bytes'
-import { faceToSfnt, openFont } from './container'
-import { describeFace, faceLabel, newTableCache } from './info'
-import { parseCmap, parseFvar, parseName, trimNuls } from './tables'
-import { Bytes, collection, ttfFixture, utf16 } from './test-fonts'
+import { MAX_FACES, faceToSfnt, openFont } from './container'
+import { describeFace, faceLabel, faceLabels, newTableCache } from './info'
+import { renderSource } from '../render'
+import { LABEL_MAX, MAX_INSTANCES, MAX_NAME_DECODE_BYTES, advanceWidths, parseCmap, parseFvar, parseName, trimNuls } from './tables'
+import { Bytes, buildFont, sfnt as buildSfnt, collection, ttfFixture, utf16 } from './test-fonts'
 
 const isDamaged = (pattern?: RegExp) => (error: unknown) =>
   error instanceof FontError && error.code === 'damaged' && (!pattern || pattern.test(error.message))
@@ -68,12 +69,13 @@ function format12(groups: [start: number, end: number, glyph: number][], format 
   return out.done()
 }
 
-function format4(segments: [start: number, end: number, delta: number][]): Uint8Array {
-  const all = [...segments, [0xffff, 0xffff, 1] as [number, number, number]]
+/** Segments [start, end, idDelta, idRangeOffset = 0]; the closing 0xFFFF segment is added. */
+function format4(segments: [start: number, end: number, delta: number, rangeOffset?: number][]): Uint8Array {
+  const all = [...segments, [0xffff, 0xffff, 1] as [number, number, number, number?]]
   const n = all.length
   const out = new Bytes().u16(4, 16 + n * 8, 0, n * 2, 0, 0, 0)
   out.u16(...all.map((s) => s[1])).u16(0).u16(...all.map((s) => s[0])).u16(...all.map((s) => s[2] & 0xffff))
-  out.u16(...all.map(() => 0))
+  out.u16(...all.map((s) => s[3] ?? 0))
   return out.done()
 }
 
@@ -227,13 +229,47 @@ test('name: blank records are skipped for the next best', () => {
   assert.equal(names.pick(1, 'en'), 'ÄA')
 })
 
+test('fvar: at most 1,000 named instances are read', () => {
+  const table = parseFvar(fvar(1, 1500, 8, 1500))
+  assert.equal(MAX_INSTANCES, 1000)
+  assert.equal(table.instances.length, 1000)
+  assert.equal(table.skippedInstances, 500)
+})
+
+test('name: names used as labels are cut at 256 characters; the Info tab keeps them whole', () => {
+  const family = 'Long Family '.repeat(40) // 480 characters
+  const info = describeFace(openFont(buildSfnt(buildFont({ family: family.trim() }))).faces[0], 'en')
+  assert.equal(info.family.length, LABEL_MAX)
+  assert.ok(info.family.endsWith('…'))
+  assert.ok(family.startsWith(info.family.slice(0, -1)))
+  assert.equal(info.names.family, family.trim())
+  // An emoji (a surrogate pair) at the cut is dropped whole, never split.
+  const emoji = parseName(nameTable([[3, 1, 0x409, 1, utf16(`${'a'.repeat(LABEL_MAX - 2)}😀😀😀`)]]))
+  const cut = emoji.label(1, 'en')!
+  assert.equal(cut, `${'a'.repeat(LABEL_MAX - 2)}…`)
+})
+
+test('name: one table decodes at most 4 MiB of strings', () => {
+  // 200 records, each a different 65,000-byte slice of the same storage: 13 MB if all decoded.
+  const count = 200
+  const storage = 6 + count * 12
+  const out = new Bytes().u16(0, count, storage)
+  for (let i = 0; i < count; i++) out.u16(3, 1, 0x409, 300 + i, 65000, i * 2)
+  for (let i = 0; i < 65000 / 2 + count; i++) out.u16(0x41)
+  const names = parseName(out.done())
+  let found = 0
+  for (let i = 0; i < count; i++) if (names.pick(300 + i, 'en')) found++
+  assert.ok(names.decodedBytes <= MAX_NAME_DECODE_BYTES)
+  assert.equal(found, Math.floor(MAX_NAME_DECODE_BYTES / 65000))
+})
+
 // ------------------------------------------------------------------------------------------------
 // 4, 9, 15 · cmap: overlaps bounded, damaged subtables skipped, Mac Roman everywhere
 
 test('cmap: overlapping groups are read once and bounded', () => {
   const overlap = cmap([{ platform: 3, encoding: 10, data: format12(Array(16).fill([0, 0x10ffff, 1])) }])
   const bounded = parseCmap(overlap, 5000)
-  assert.equal(bounded.codes.length, 5000)
+  assert.equal(bounded.codes.length, 4999) // the group itself is one step of the 5000
   assert.ok(bounded.problems[0].includes('overlap'))
   const full = parseCmap(overlap)
   assert.equal(full.codes.length, 0x110000)
@@ -242,6 +278,35 @@ test('cmap: overlapping groups are read once and bounded', () => {
   const bmp = parseCmap(segments, 70000)
   assert.equal(bmp.codes.length, 0xffff)
   assert.ok(bmp.problems[0].includes('overlap'))
+})
+
+test('cmap: one budget for the whole call counts glyph reads that fall past the table', () => {
+  // idRangeOffset 0xFFFE sends every glyph read of 0..0xFFFE past the table: nothing is mapped,
+  // but each read is a step of the budget, so the call stops instead of looping in silence.
+  const pastTheTable = cmap([{ platform: 3, encoding: 1, data: format4([[0, 0xfffe, 0, 0xfffe]]) }])
+  const bounded = parseCmap(pastTheTable, 1000)
+  assert.equal(bounded.codes.length, 0)
+  assert.deepEqual(bounded.problems, ['cmap 3/1 format 4: reading stopped after 1000 steps (ranges that overlap or point past the table)'])
+  // A thousand such segments would be 65 million reads; the default budget stops them.
+  const many = parseCmap(cmap([{ platform: 3, encoding: 1, data: format4(Array(1000).fill([0, 0xfffe, 0, 0xfffe])) }]))
+  assert.equal(many.codes.length, 0)
+  assert.ok(many.problems[0].includes('reading stopped after'))
+})
+
+test('cmap: subtables that fail share one budget, and at most 16 are tried', () => {
+  // 40 format 6 subtables, each listing 65,535 glyphs: each reads on to the end of the table
+  // (about 1,100 glyph ids), then fails there, and the next one starts over.
+  const failing = Array.from({ length: 40 }, () => ({ platform: 3, encoding: 1, data: new Bytes().u16(6, 10, 0, 0x20, 0xffff).done() }))
+  const table = new Bytes().bytes(cmap(failing)).bytes(new Uint8Array(2000)).done()
+  const capped = parseCmap(table)
+  assert.equal(capped.codes.length, 0)
+  assert.equal(capped.problems.length, 17)
+  assert.ok(capped.problems.slice(0, 16).every((p) => p.startsWith('cmap 3/1 format 6: read of 2 bytes')))
+  assert.equal(capped.problems[16], 'cmap: only the first 16 subtables were tried')
+  // A budget of 3,000 steps is spent in the third subtable; no other is tried.
+  const shared = parseCmap(table, 3000)
+  assert.equal(shared.problems.length, 3)
+  assert.ok(shared.problems[2].includes('reading stopped after 3000 steps'))
 })
 
 test('cmap: codes in descending order come out sorted, first mapping wins', () => {
@@ -291,6 +356,62 @@ test('collection: a face that cannot be read is marked; the others open', () => 
   assert.throws(() => openFont(collection([font], () => [0xfffff0, 0xfffff4], 2)), isDamaged(/no face of the collection/))
 })
 
+/** A name table of `count` records: full name "Shared Face", then filler names. */
+function bigName(count: number): Uint8Array {
+  return nameTable([[3, 1, 0x409, 4, utf16('Shared Face')], ...Array.from({ length: count - 1 }, (_, i) => [3, 1, 0x409, 1000 + i, utf16('x')] as [number, number, number, number, Uint8Array])])
+}
+
+/**
+ * A collection of faces that have only a name table: `copies` copies of `name` lie one after
+ * another (with `slack` spare bytes after the last), and face i points at `place(i, starts)`.
+ */
+function nameCollection(name: Uint8Array, faces: number, copies: number, place: (i: number, starts: number[]) => [offset: number, length: number], slack = 0): Uint8Array {
+  const dataAt = 12 + faces * 4 + faces * 28
+  const starts = Array.from({ length: copies }, (_, c) => dataAt + c * ((name.length + 3) & ~3))
+  const out = new Bytes().tag('ttcf').u32(0x00010000, faces)
+  for (let i = 0; i < faces; i++) out.u32(12 + faces * 4 + i * 28)
+  for (let i = 0; i < faces; i++) {
+    const [offset, length] = place(i, starts)
+    out.u32(0x00010000).u16(1, 16, 0, 0).tag('name').u32(0, offset, length)
+  }
+  for (let c = 0; c < copies; c++) {
+    out.bytes(name)
+    while (out.length % 4) out.u8(0)
+  }
+  return out.bytes(new Uint8Array(slack)).done()
+}
+
+test('collection: faces naming one name table with different lengths parse it once', () => {
+  // 50 faces give the same start and lengths that differ by one: one parse of 1,000 records.
+  const name = bigName(1000)
+  const bytes = nameCollection(name, 50, 1, (i, starts) => [starts[0], name.length + i], 64)
+  const labels = faceLabels(openFont(bytes).faces, 'en', newTableCache(), 5000)
+  assert.deepEqual(labels, Array(50).fill('Shared Face'))
+})
+
+test('collection: face labels share one budget; once it is spent, faces are labelled #n', () => {
+  // 20 copies of a 1,000-record name table, one per face: the budget pays for four parses.
+  const name = bigName(1000)
+  const bytes = nameCollection(name, 20, 20, (i, starts) => [starts[i], name.length])
+  const labels = faceLabels(openFont(bytes).faces, 'en', newTableCache(), 5000)
+  assert.deepEqual(labels.slice(0, 4), Array(4).fill('Shared Face'))
+  assert.deepEqual(labels.slice(4), Array.from({ length: 16 }, (_, i) => `#${i + 5}`))
+  // The real budget labels every face of an ordinary collection.
+  assert.deepEqual(faceLabels(openFont(bytes).faces, 'en'), Array(20).fill('Shared Face'))
+})
+
+test('WOFF2: a collection listing more than 10,000 faces is refused', async () => {
+  await loadBrotliDictionary()
+  const woff2 = (faces: number) =>
+    new Bytes()
+      .tag('wOF2').tag('ttcf').u32(0).u16(1, 0).u32(0, 0).u16(1, 0).u32(0, 0, 0, 0, 0) // header
+      .u8(1, 54) // head, 54 bytes
+      .u32(0x00010000).u8(253).u16(faces) // collection header: version, numFonts as 255UInt16
+      .done()
+  assert.equal(MAX_FACES, 10000)
+  assert.throws(() => openFont(woff2(MAX_FACES + 1)), isDamaged(/collection lists 10001 fonts/))
+})
+
 // ------------------------------------------------------------------------------------------------
 // 7 · tables past the end of the file
 
@@ -312,6 +433,120 @@ test('tables past the end of the file are reported; without head, name or cmap t
   const noCmap = sfnt({ name: BASIC_NAME, head: HEAD })
   new DataView(noCmap.buffer).setUint32(12 + 8, 0x7ffffff0) // head sorts first
   assert.equal(describeFace(openFont(noCmap).faces[0], 'en').damaged, 'head lies past the end of the file; the font has no cmap table')
+  // In the Russian UI the reason is Russian too.
+  assert.equal(describeFace(openFont(cut).faces[0], 'ru').damaged, 'таблицы head, name, cmap выходят за конец файла')
+  assert.equal(describeFace(openFont(noCmap).faces[0], 'ru').damaged, 'таблица head выходит за конец файла; в шрифте нет таблицы cmap')
+  const noNameOrCmap = sfnt({ head: HEAD })
+  assert.equal(describeFace(openFont(noNameOrCmap).faces[0], 'en').damaged, 'the font has no name, cmap tables')
+  assert.equal(describeFace(openFont(noNameOrCmap).faces[0], 'ru').damaged, 'в шрифте нет таблиц name, cmap')
+})
+
+// ------------------------------------------------------------------------------------------------
+// Faces cut out of a collection: overlapping or oversized tables are refused
+
+/**
+ * A one-face collection with the crafted font's own tables, then `aliases` more tags, each
+ * `[offset, length]` from `alias(fileSize, starts)`.
+ */
+function aliasedCollection(aliases: number, alias: (fileSize: number, starts: number[]) => [number, number]): Uint8Array {
+  const tables: Record<string, Uint8Array> = { cmap: cmap([{ platform: 3, encoding: 1, data: format4([[0x41, 0x5a, 1]]) }]), head: HEAD, name: BASIC_NAME }
+  const tags = Object.keys(tables)
+  const numTables = tags.length + aliases
+  let offset = 16 + 12 + numTables * 16
+  const starts = tags.map((tag) => {
+    const at = offset
+    offset += (tables[tag].length + 3) & ~3
+    return at
+  })
+  const fileSize = offset
+  const out = new Bytes().tag('ttcf').u32(0x00010000, 1, 16).u32(0x00010000).u16(numTables, 0, 0, 0)
+  tags.forEach((tag, i) => out.tag(tag).u32(0, starts[i], tables[tag].length))
+  for (let a = 0; a < aliases; a++) out.tag(`z${String(a).padStart(3, '0')}`).u32(0, ...alias(fileSize, starts))
+  for (const tag of tags) {
+    out.bytes(tables[tag])
+    while (out.length % 4) out.u8(0)
+  }
+  return out.done()
+}
+
+test('a collection face whose tables add up to more than the file is not cut out', () => {
+  // 300 tags that each name the whole file would make a cut-out 300 times its size.
+  const bytes = aliasedCollection(300, (fileSize) => [0, fileSize])
+  const container = openFont(bytes)
+  assert.equal(describeFace(container.faces[0], 'en').family, 'Crafted')
+  const source = renderSource(container, 0, bytes)
+  assert.equal(source.kind, 'error')
+  assert.ok(source.kind === 'error' && /tables add up to \d+ bytes, more than \d+/.test(source.message))
+  assert.throws(() => faceToSfnt(container.faces[0], 1 << 20), isDamaged(/add up to/))
+})
+
+test('a collection face whose tables overlap is not cut out', () => {
+  // One extra tag: four bytes inside cmap, so the total still fits the file.
+  const bytes = aliasedCollection(1, (_, starts) => [starts[0] + 4, 4])
+  const source = renderSource(openFont(bytes), 0, bytes)
+  assert.deepEqual(source, { kind: 'error', message: 'tables cmap and z000 of the face overlap' })
+  // Without the extra tag the same face cuts out.
+  const plain = aliasedCollection(0, () => [0, 0])
+  assert.equal(renderSource(openFont(plain), 0, plain).kind, 'bytes')
+})
+
+// ------------------------------------------------------------------------------------------------
+// Monospaced: post, OS/2 PANOSE, or the advances of printable ASCII
+
+/**
+ * A font mapping U+0021–007E to glyphs 1–94, with `glyphs` glyphs whose advances `advance` gives,
+ * post's isFixedPitch and OS/2's PANOSE bytes.
+ */
+function metricsFont({ advance, panose = [], fixedPitch = false, glyphs = 95 }: { advance: (glyph: number) => number; panose?: number[]; fixedPitch?: boolean; glyphs?: number }): Uint8Array {
+  const os2 = new Bytes()
+    .u16(0, 600, 400, 5, 0) // version, xAvgCharWidth, weight, width, fsType
+    .u16(...Array(11).fill(0)) // sub- and superscripts, strikeout, family class
+    .u8(...panose, ...Array(10 - panose.length).fill(0))
+    .u32(0, 0, 0, 0)
+    .tag('TEST')
+    .u16(0x40, 0x21, 0x7e, 800, -200, 0, 800, 200) // fsSelection … winDescent
+    .done()
+  const hhea = new Bytes().u32(0x00010000).u16(800, -200, 0, 1800, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, glyphs).done()
+  const hmtx = new Bytes()
+  for (let glyph = 0; glyph < glyphs; glyph++) hmtx.u16(advance(glyph), 0)
+  return sfnt({
+    'OS/2': os2,
+    cmap: cmap([{ platform: 3, encoding: 10, data: format12([[0x21, 0x7e, 1]]) }]),
+    head: HEAD,
+    hhea,
+    hmtx: hmtx.done(),
+    name: BASIC_NAME,
+    post: new Bytes().u32(0x00030000).fixed(0).u16(-100, 50).u32(fixedPitch ? 1 : 0, 0, 0, 0, 0).done()
+  })
+}
+
+const monospace = (bytes: Uint8Array) => describeFace(openFont(bytes).faces[0], 'en').monospace
+
+test('monospaced: a Noto Sans Mono-like font, whose post says proportional, by its PANOSE', () => {
+  // Noto Sans Mono: isFixedPitch 0, PANOSE 2 11 5 9 …; ASCII at 600, wide glyphs at 1200 and 1800.
+  const noto = (glyph: number) => (glyph < 95 ? 600 : glyph % 10 === 0 ? 1800 : 1200)
+  assert.equal(monospace(metricsFont({ advance: noto, panose: [2, 11, 5, 9, 4, 5, 4, 2, 2, 4], glyphs: 400 })), true)
+  // PANOSE 2/9 alone is enough, whatever the advances.
+  assert.equal(monospace(metricsFont({ advance: (glyph) => 300 + glyph * 7, panose: [2, 11, 5, 9] })), true)
+  // Monospaced proportion means it only for Latin Text: 9 in a decorative font's fourth byte is not it.
+  assert.equal(monospace(metricsFont({ advance: (glyph) => 300 + glyph * 7, panose: [4, 0, 0, 9] })), false)
+  assert.equal(monospace(metricsFont({ advance: () => 600, fixedPitch: true, glyphs: 2 })), true)
+})
+
+test('monospaced: by the advances of printable ASCII when post and PANOSE say nothing', () => {
+  // Roboto Mono-like: PANOSE family type 0, every glyph 1229.
+  assert.equal(monospace(metricsFont({ advance: () => 1229 })), true)
+  // Three of 94 ASCII glyphs wider (under 5 %): still monospaced.
+  assert.equal(monospace(metricsFont({ advance: (glyph) => (glyph === 10 || glyph === 20 || glyph === 30 ? 1200 : 600) })), true)
+  // Proportional Latin.
+  assert.equal(monospace(metricsFont({ advance: (glyph) => 300 + (glyph % 9) * 50 })), false)
+  // A CJK-like font: proportional ASCII, then 2,000 glyphs one em wide; they do not count.
+  assert.equal(monospace(metricsFont({ advance: (glyph) => (glyph < 95 ? 300 + (glyph % 9) * 50 : 1000), glyphs: 2095 })), false)
+  // Glyphs past numberOfHMetrics take the last advance; a record past the table is not measured.
+  assert.deepEqual(advanceWidths(new Bytes().u16(500, 0, 700, 0).done(), 2, [0, 1, 5]), [500, 700, 700])
+  assert.deepEqual(advanceWidths(new Bytes().u16(500, 0).done(), 3, [0, 2]), [500, null])
+  // The test fixture has four ASCII letters at 600: too few to tell.
+  assert.equal(monospace(ttfFixture), false)
 })
 
 // ------------------------------------------------------------------------------------------------

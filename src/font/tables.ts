@@ -63,17 +63,24 @@ const MAC_LANGUAGES: Record<number, string> = {
 
 /** Records a name lookup tries before giving up on blank strings. */
 const MAX_TRIES = 8
+/** Names used as labels (instances, axes, features, the header, the face picker) are cut here. */
+export const LABEL_MAX = 256
+/** Bytes of strings one name table decodes at most; real tables hold a few kilobytes. */
+export const MAX_NAME_DECODE_BYTES = 4 * 1024 * 1024
 /** Language tags are short; a longer one is cut, not decoded whole. */
 const MAX_TAG_BYTES = 64
 
 /**
  * A name table: records indexed by name id; strings are decoded on demand, once per (encoding,
- * offset, length), so a table of thousands of records sharing one long string stays cheap.
+ * offset, length), so a table of thousands of records sharing one long string stays cheap. All
+ * the strings one table decodes add up to at most MAX_NAME_DECODE_BYTES; past that a string reads
+ * as blank.
  */
 export class NameTable {
   private readonly byId = new Map<number, NameRecord[]>()
   private readonly strings = new Map<string, string>()
   private readonly picked = new Map<string, string | null>()
+  private decoded = 0
   readonly size: number
 
   constructor(
@@ -94,14 +101,28 @@ export class NameTable {
     return this.strings.size
   }
 
-  /** The decoded string of a record, without trailing NULs. */
-  text(record: NameRecord): string {
+  /** Bytes of string storage decoded so far. */
+  get decodedBytes(): number {
+    return this.decoded
+  }
+
+  /**
+   * The decoded string of a record, without trailing NULs; with `maxChars`, only enough of its
+   * bytes for that many characters and one more are decoded.
+   */
+  text(record: NameRecord, maxChars = Infinity): string {
     const mac = record.platformId === 1
-    const key = `${mac ? 'm' : 'u'}:${record.offset}:${record.length}`
+    const length = Math.min(record.length, mac ? maxChars + 1 : (maxChars + 1) * 2)
+    const key = `${mac ? 'm' : 'u'}:${record.offset}:${length}`
     let value = this.strings.get(key)
     if (value === undefined) {
-      const raw = this.reader.slice(this.storage + record.offset, record.length)
-      value = trimNuls(mac ? decodeMacRoman(raw) : decodeUtf16(raw))
+      if (this.decoded + length > MAX_NAME_DECODE_BYTES) {
+        value = ''
+      } else {
+        this.decoded += length
+        const raw = this.reader.slice(this.storage + record.offset, length)
+        value = trimNuls(mac ? decodeMacRoman(raw) : decodeUtf16(raw))
+      }
       this.strings.set(key, value)
     }
     return value
@@ -111,9 +132,9 @@ export class NameTable {
    * The best string for `nameId`: the UI language first, then English, then anything, preferring
    * Windows/Unicode records over Mac ones at each step; blank strings are skipped.
    */
-  pick(nameId: number, uiLanguage: string): string | null {
+  pick(nameId: number, uiLanguage: string, maxChars = Infinity): string | null {
     const ui = uiLanguage.toLowerCase().split('-')[0]
-    const cacheKey = `${nameId}:${ui}`
+    const cacheKey = `${nameId}:${ui}:${maxChars}`
     const cached = this.picked.get(cacheKey)
     if (cached !== undefined) return cached
     const candidates = (this.byId.get(nameId) ?? []).map((record, order) => {
@@ -128,7 +149,7 @@ export class NameTable {
     candidates.sort((a, b) => b.score - a.score || a.order - b.order)
     let result: string | null = null
     for (const { record } of candidates.slice(0, MAX_TRIES)) {
-      const value = this.text(record)
+      const value = this.text(record, maxChars)
       if (value.trim()) {
         result = value
         break
@@ -137,6 +158,21 @@ export class NameTable {
     this.picked.set(cacheKey, result)
     return result
   }
+
+  /** `pick` for a label: at most LABEL_MAX characters, the last one an ellipsis when cut. */
+  label(nameId: number, uiLanguage: string): string | null {
+    const value = this.pick(nameId, uiLanguage, LABEL_MAX)
+    return value === null ? null : capLabel(value)
+  }
+}
+
+/** `text` cut to LABEL_MAX characters, ending in "…", without splitting a surrogate pair. */
+export function capLabel(text: string): string {
+  if (text.length <= LABEL_MAX) return text
+  let end = LABEL_MAX - 1
+  const last = text.charCodeAt(end - 1)
+  if (last >= 0xd800 && last <= 0xdbff) end--
+  return `${text.slice(0, end)}…`
 }
 
 export function parseName(bytes: Uint8Array): NameTable {
@@ -208,11 +244,23 @@ export function parseHead(bytes: Uint8Array): HeadTable {
   }
 }
 
-export type HheaTable = { ascender: number; descender: number; lineGap: number }
+export type HheaTable = { ascender: number; descender: number; lineGap: number; numberOfHMetrics: number }
 
 export function parseHhea(bytes: Uint8Array): HheaTable {
   const r = new Reader(bytes)
-  return { ascender: r.i16(4), descender: r.i16(6), lineGap: r.i16(8) }
+  return { ascender: r.i16(4), descender: r.i16(6), lineGap: r.i16(8), numberOfHMetrics: r.has(34, 2) ? r.u16(34) : 0 }
+}
+
+/**
+ * The advance width of each of `glyphs` from an hmtx table: glyphs past numberOfHMetrics share
+ * the last record's advance; null for a glyph whose record lies past the table.
+ */
+export function advanceWidths(hmtx: Uint8Array, numberOfHMetrics: number, glyphs: readonly number[]): (number | null)[] {
+  const r = new Reader(hmtx)
+  return glyphs.map((glyph) => {
+    const at = Math.min(glyph, numberOfHMetrics - 1) * 4
+    return numberOfHMetrics > 0 && r.has(at, 2) ? r.u16(at) : null
+  })
 }
 
 export function parseMaxp(bytes: Uint8Array): number {
@@ -248,6 +296,8 @@ export type Os2Table = {
   winDescent: number
   xHeight: number | null
   capHeight: number | null
+  /** The 10 PANOSE bytes, or [] when the table is too short. */
+  panose: number[]
 }
 
 export function parseOs2(bytes: Uint8Array): Os2Table {
@@ -267,7 +317,8 @@ export function parseOs2(bytes: Uint8Array): Os2Table {
     winAscent: r.has(74, 2) ? r.u16(74) : 0,
     winDescent: r.has(76, 2) ? r.u16(76) : 0,
     xHeight: hasV2 ? r.i16(86) : null,
-    capHeight: hasV2 ? r.i16(88) : null
+    capHeight: hasV2 ? r.i16(88) : null,
+    panose: r.has(32, 10) ? Array.from({ length: 10 }, (_, i) => r.u8(32 + i)) : []
   }
 }
 
@@ -289,13 +340,25 @@ export type CharMap = {
 
 const UNICODE_SIZE = 0x110000
 
-/** Thrown when a subtable makes the builder do more work than Unicode has code points. */
+/** Thrown when one parseCmap call has done all the work its budget allows. */
 class OverBudget extends Error {}
+
+/** The work one parseCmap call may do, shared by every subtable it tries. */
+class Work {
+  constructor(public left: number) {}
+
+  /** One loop step: a code point read, a segment or group visited, or a glyph read skipped. */
+  step(): void {
+    if (--this.left < 0) {
+      throw new OverBudget()
+    }
+  }
+}
 
 /**
  * Collects code point → glyph pairs. A code point is kept the first time it comes (a bitset
- * drops repeats), and the work is bounded: overlapping ranges cannot make it loop or grow
- * beyond `budget` code points.
+ * drops repeats), and every step is paid from the call's shared `work`, so overlapping ranges or
+ * glyph reads that fall past the table cannot make it loop for long.
  */
 class MapBuilder {
   private codes = new Uint32Array(1024)
@@ -306,13 +369,16 @@ class MapBuilder {
 
   constructor(
     private readonly macRoman: boolean,
-    private budget: number
+    private readonly work: Work
   ) {}
 
+  /** A loop step that adds nothing. */
+  step(): void {
+    this.work.step()
+  }
+
   add(code: number, glyph: number): void {
-    if (--this.budget < 0) {
-      throw new OverBudget()
-    }
+    this.work.step()
     if (this.macRoman) {
       // A Mac Roman subtable maps single bytes; the high half is not Latin-1.
       if (code > 0xff) return
@@ -373,10 +439,14 @@ const CMAP_PREFERENCE: [number, number][] = [
   [3, 10], [0, 6], [0, 4], [3, 1], [0, 3], [0, 2], [0, 1], [0, 0], [3, 0], [1, 0]
 ]
 
+/** Subtables one parseCmap call tries at most; real fonts have a handful. */
+export const MAX_CMAP_SUBTABLES = 16
+
 /**
  * The font's character map from its best subtable. A damaged subtable is skipped for the next
- * best one; `budget` bounds the code points a subtable may produce (overlapping ranges in a
- * hostile font would otherwise repeat all of Unicode many times).
+ * best one, up to MAX_CMAP_SUBTABLES. `budget` bounds the loop steps of the whole call, shared by
+ * every subtable tried: overlapping ranges, glyph reads past the table, or many overlapping
+ * subtables that each fail at the end would otherwise repeat all of Unicode many times.
  */
 export function parseCmap(bytes: Uint8Array, budget = 2 * UNICODE_SIZE): CharMap {
   const r = new Reader(bytes)
@@ -400,18 +470,24 @@ export function parseCmap(bytes: Uint8Array, budget = 2 * UNICODE_SIZE): CharMap
   subtables.sort((a, b) => rank(a) - rank(b))
   const problems: string[] = []
   const tried = new Set<string>()
+  const work = new Work(budget)
   for (const sub of subtables) {
     const label = `cmap ${sub.platform}/${sub.encoding} format ${sub.format}`
     const key = `${sub.offset}:${sub.platform === 1 && sub.encoding === 0}`
     if (tried.has(key)) continue
+    if (tried.size === MAX_CMAP_SUBTABLES) {
+      problems.push(`cmap: only the first ${MAX_CMAP_SUBTABLES} subtables were tried`)
+      break
+    }
     tried.add(key)
-    const builder = new MapBuilder(sub.platform === 1 && sub.encoding === 0, budget)
+    const builder = new MapBuilder(sub.platform === 1 && sub.encoding === 0, work)
     let known: boolean
     try {
       known = readSubtable(r, sub.offset, sub.format, builder)
     } catch (error) {
       if (error instanceof OverBudget) {
-        problems.push(`${label}: its ranges overlap; reading stopped after ${budget} code points`)
+        // The budget is spent: keep what this subtable gave and try no other.
+        problems.push(`${label}: reading stopped after ${budget} steps (ranges that overlap or point past the table)`)
         known = true
       } else {
         problems.push(`${label}: ${error instanceof Error ? error.message : String(error)}`)
@@ -442,6 +518,7 @@ function readSubtable(r: Reader, at: number, format: number, out: MapBuilder): b
       const idDeltas = startCodes + segCountX2
       const idRangeOffsets = idDeltas + segCountX2
       for (let s = 0; s < segCount; s++) {
+        out.step()
         const end = r.u16(endCodes + s * 2)
         const start = r.u16(startCodes + s * 2)
         const delta = r.i16(idDeltas + s * 2)
@@ -454,7 +531,10 @@ function readSubtable(r: Reader, at: number, format: number, out: MapBuilder): b
             glyph = (code + delta) & 0xffff
           } else {
             const glyphAt = rangeOffsetAt + rangeOffset + (code - start) * 2
-            if (!r.has(glyphAt, 2)) continue
+            if (!r.has(glyphAt, 2)) {
+              out.step()
+              continue
+            }
             glyph = r.u16(glyphAt)
             if (glyph !== 0) glyph = (glyph + delta) & 0xffff
           }
@@ -483,6 +563,7 @@ function readSubtable(r: Reader, at: number, format: number, out: MapBuilder): b
     case 13: {
       const groups = r.u32(at + 12)
       for (let g = 0; g < groups; g++) {
+        out.step()
         const group = at + 16 + g * 12
         const start = r.u32(group)
         const end = Math.min(r.u32(group + 4), UNICODE_SIZE - 1)
@@ -512,10 +593,13 @@ export type FvarTable = {
 
 /** More axes than any real font has; each one becomes a slider. */
 const MAX_AXES = 64
+/** Named instances read at most; real fonts have tens, a few hundred at the most. */
+export const MAX_INSTANCES = 1000
 
 /**
  * The variation axes and named instances. Record sizes are checked against the spec (an instance
- * is 4 + 4·axes bytes, or 6 more with a PostScript name id) and `maxWork` bounds instances × axes.
+ * is 4 + 4·axes bytes, or 6 more with a PostScript name id); at most MAX_INSTANCES instances are
+ * read, and `maxWork` bounds instances × axes.
  */
 export function parseFvar(bytes: Uint8Array, maxWork = 65536): FvarTable {
   const r = new Reader(bytes)
@@ -551,7 +635,7 @@ export function parseFvar(bytes: Uint8Array, maxWork = 65536): FvarTable {
   }
   const instancesAt = axesOffset + axisCount * axisSize
   const fit = instanceSize > 0 ? Math.max(0, Math.floor((r.length - instancesAt) / instanceSize)) : 0
-  const readable = Math.min(instanceCount, fit, Math.floor(maxWork / Math.max(1, axisCount)))
+  const readable = Math.min(instanceCount, fit, MAX_INSTANCES, Math.floor(maxWork / Math.max(1, axisCount)))
   const hasPsName = instanceSize === plainSize + 2
   const instances: NamedInstance[] = []
   for (let i = 0; i < readable; i++) {

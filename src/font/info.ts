@@ -1,6 +1,7 @@
 // Everything the viewer shows about one face, read from its tables. Missing or damaged tables
 // leave their fields empty instead of failing the whole font.
 
+import { fill, stringsFor } from '../i18n'
 import { FontError } from './bytes'
 import { type Face, SFNT_TRUETYPE } from './container'
 import {
@@ -12,6 +13,7 @@ import {
   type NameTable,
   type Os2Table,
   type PostTable,
+  advanceWidths,
   parseCmap,
   parseFeatureList,
   parseFvar,
@@ -69,12 +71,22 @@ export type FaceInfo = {
 
 /**
  * Parsed tables, shared by the faces of a collection: faces often point at the same name or cmap
- * table, and a hostile collection may point hundreds of faces at one expensive table.
+ * table, and a hostile collection may point hundreds of faces at one expensive table. A name
+ * table is known by where it starts alone, so faces that give the same start with different
+ * lengths share one parse too.
  */
 export type TableCache = WeakMap<ArrayBufferLike, Map<string, unknown>>
 
 export function newTableCache(): TableCache {
   return new WeakMap()
+}
+
+function cacheKey(tag: string, bytes: Uint8Array): string {
+  return tag === 'name' ? `name:${bytes.byteOffset}` : `${tag}:${bytes.byteOffset}:${bytes.byteLength}`
+}
+
+function isCached(cache: TableCache, tag: string, bytes: Uint8Array): boolean {
+  return cache.get(bytes.buffer)?.has(cacheKey(tag, bytes)) ?? false
 }
 
 function cached<T>(cache: TableCache, tag: string, bytes: Uint8Array, parse: () => T): T {
@@ -83,7 +95,7 @@ function cached<T>(cache: TableCache, tag: string, bytes: Uint8Array, parse: () 
     perBuffer = new Map()
     cache.set(bytes.buffer, perBuffer)
   }
-  const key = `${tag}:${bytes.byteOffset}:${bytes.byteLength}`
+  const key = cacheKey(tag, bytes)
   if (perBuffer.has(key)) {
     const hit = perBuffer.get(key)
     if (hit instanceof Error) throw hit
@@ -136,13 +148,73 @@ function readNames(face: Face, problems: string[], cache: TableCache): NameTable
 export function faceLabel(face: Face, index: number, uiLanguage: string, cache: TableCache = newTableCache()): string {
   if (face.error) return `#${index + 1}`
   const names = readNames(face, [], cache)
-  const pick = (id: number) => names?.pick(id, uiLanguage) ?? null
+  const pick = (id: number) => names?.label(id, uiLanguage) ?? null
   const label =
     pick(NAME_IDS.fullName) ??
     [pick(NAME_IDS.typographicFamily) ?? pick(NAME_IDS.family), pick(NAME_IDS.typographicSubfamily) ?? pick(NAME_IDS.subfamily)]
       .filter(Boolean)
       .join(' ')
   return label || `#${index + 1}`
+}
+
+/** What the collection picker's labels may cost over all faces: name records parsed plus bytes decoded. */
+export const LABEL_BUDGET = 1 << 18
+
+/**
+ * The collection picker's label of every face. Together they cost at most `budget` (name records
+ * parsed plus string bytes decoded); once it is spent, the faces left are labelled "#n".
+ */
+export function faceLabels(faces: readonly Face[], uiLanguage: string, cache: TableCache = newTableCache(), budget = LABEL_BUDGET): string[] {
+  let left = budget
+  return faces.map((face, index) => {
+    const bytes = face.tables.get('name')
+    if (face.error || !bytes || left <= 0) return `#${index + 1}`
+    if (!isCached(cache, 'name', bytes)) {
+      const records = bytes.byteLength >= 4 ? (bytes[2] << 8) | bytes[3] : 0
+      if (records > left) {
+        left = 0
+        return `#${index + 1}`
+      }
+      left -= records
+    }
+    const names = readNames(face, [], cache)
+    const before = names?.decodedBytes ?? 0
+    const label = faceLabel(face, index, uiLanguage, cache)
+    left -= (names?.decodedBytes ?? 0) - before
+    return label
+  })
+}
+
+/**
+ * Whether a font is monospaced: post says so; or OS/2 PANOSE says Latin Text (2) with Monospaced
+ * proportion (9), as Noto Sans Mono does while its post says otherwise; or nearly all its printable
+ * ASCII characters (U+0021–007E, at least ten) have one advance width. Only ASCII is measured: in
+ * a CJK font nearly every glyph is one em wide, yet its Latin letters are proportional.
+ */
+export function isMonospace(post: PostTable | null, os2: Os2Table | null, hhea: HheaTable | null, hmtx: Uint8Array | undefined, cmap: CharMap): boolean {
+  if (post?.isFixedPitch) return true
+  if (os2?.panose[0] === 2 && os2.panose[3] === 9) return true
+  if (!hhea || !hmtx) return false
+  const glyphs: number[] = []
+  let lo = 0
+  let hi = cmap.codes.length
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1
+    if (cmap.codes[mid] < 0x21) lo = mid + 1
+    else hi = mid
+  }
+  for (let i = lo; i < cmap.codes.length && cmap.codes[i] <= 0x7e; i++) {
+    if (cmap.glyphs[i] !== 0) glyphs.push(cmap.glyphs[i])
+  }
+  const counts = new Map<number, number>()
+  let measured = 0
+  for (const advance of advanceWidths(hmtx, hhea.numberOfHMetrics, glyphs)) {
+    if (!advance) continue
+    measured++
+    counts.set(advance, (counts.get(advance) ?? 0) + 1)
+  }
+  if (measured < 10) return false
+  return Math.max(...counts.values()) >= measured * 0.95
 }
 
 export function describeFace(face: Face, uiLanguage: string, cache: TableCache = newTableCache()): FaceInfo {
@@ -158,6 +230,8 @@ export function describeFace(face: Face, uiLanguage: string, cache: TableCache =
 
   const names = readNames(face, problems, cache)
   const name = (id: number) => names?.pick(id, uiLanguage) ?? null
+  // Names the UI shows as labels are cut to LABEL_MAX characters; the Info tab shows them whole.
+  const label = (id: number) => names?.label(id, uiLanguage) ?? null
   const nameValues: Partial<Record<NameKey, string>> = {}
   for (const [key, id] of Object.entries(NAME_IDS) as [NameKey, number][]) {
     const value = name(id)
@@ -185,14 +259,14 @@ export function describeFace(face: Face, uiLanguage: string, cache: TableCache =
   }
   const axes: AxisInfo[] = (fvar?.axes ?? []).map((axis) => ({
     tag: axis.tag,
-    name: name(axis.nameId) ?? axis.tag,
+    name: label(axis.nameId) ?? axis.tag,
     min: axis.min,
     default: axis.default,
     max: axis.max,
     hidden: axis.hidden
   }))
   const instances: InstanceInfo[] = (fvar?.instances ?? []).map((instance, i) => ({
-    name: name(instance.nameId) ?? `#${i + 1}`,
+    name: label(instance.nameId) ?? `#${i + 1}`,
     coordinates: instance.coordinates
   }))
 
@@ -203,7 +277,7 @@ export function describeFace(face: Face, uiLanguage: string, cache: TableCache =
     const list: FeatureEntry[] = attempt(problems, tag, () => cached(cache, tag, bytes, () => parseFeatureList(bytes))) ?? []
     for (const entry of list) {
       const existing = features.get(entry.tag)
-      const uiName = entry.uiNameId !== null ? name(entry.uiNameId) : null
+      const uiName = entry.uiNameId !== null ? label(entry.uiNameId) : null
       if (existing) {
         existing.table = existing.table === tag ? tag : 'both'
         existing.uiName ??= uiName
@@ -232,17 +306,18 @@ export function describeFace(face: Face, uiLanguage: string, cache: TableCache =
   if (missing.length) {
     const outside = missing.filter((tag) => face.tableList.some((t) => t.tag === tag && t.outside))
     const absent = missing.filter((tag) => !outside.includes(tag))
+    const s = stringsFor(uiLanguage)
     damaged = [
-      outside.length ? `${outside.join(', ')} ${outside.length === 1 ? 'lies' : 'lie'} past the end of the file` : '',
-      absent.length ? `the font has no ${absent.join(', ')} table` : ''
+      outside.length ? fill(outside.length === 1 ? s.damageOutsideOne : s.damageOutsideMany, { tables: outside.join(', ') }) : '',
+      absent.length ? fill(absent.length === 1 ? s.damageMissingOne : s.damageMissingMany, { tables: absent.join(', ') }) : ''
     ]
       .filter(Boolean)
       .join('; ')
   }
 
   return {
-    family: nameValues.typographicFamily ?? nameValues.family ?? '',
-    style: nameValues.typographicSubfamily ?? nameValues.subfamily ?? '',
+    family: label(NAME_IDS.typographicFamily) ?? label(NAME_IDS.family) ?? '',
+    style: label(NAME_IDS.typographicSubfamily) ?? label(NAME_IDS.subfamily) ?? '',
     names: nameValues,
     outlines,
     sfntVersion: describeSfntVersion(face.sfntVersion),
@@ -256,7 +331,7 @@ export function describeFace(face: Face, uiLanguage: string, cache: TableCache =
     instances,
     features: [...features.values()],
     color,
-    monospace: post?.isFixedPitch ?? false,
+    monospace: isMonospace(post, os2, hhea, table('hmtx'), cmap),
     variable: tableNames.has('fvar') && axes.length > 0,
     problems,
     damaged

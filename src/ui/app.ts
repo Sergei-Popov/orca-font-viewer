@@ -5,10 +5,10 @@ import { defaultSample } from '../describe'
 import { FontError } from '../font/bytes'
 import { loadBrotliDictionary } from '../font/brotli-dictionary'
 import { type FontContainer, needsBrotliDictionary, openFont } from '../font/container'
-import { type FaceInfo, type TableCache, describeFace, faceLabel, newTableCache } from '../font/info'
+import { type FaceInfo, type TableCache, describeFace, faceLabels, newTableCache } from '../font/info'
 import { type Language, type Strings, fill } from '../i18n'
 import { icon } from '../icons'
-import { axesFor, faceStyle, fontMime, renderSource } from '../render'
+import { axesFor, faceStyle, renderSource } from '../render'
 import { CharactersTab } from './characters'
 import { h, html } from './dom'
 import { InfoTab } from './info'
@@ -147,11 +147,11 @@ export class App {
       return
     }
     const cache = newTableCache()
+    // Labels for the face picker, under one budget for all faces ("#n" once it is spent).
     const labels = container.collection
-      ? container.faces.map((face, i) => {
-          const label = faceLabel(face, i, this.language, cache)
-          return face.error ? fill(s.faceDamaged, { label }) : label
-        })
+      ? faceLabels(container.faces, this.language, cache).map((label, i) =>
+          container.faces[i].error ? fill(s.faceDamaged, { label }) : label
+        )
       : []
     const loaded: Loaded = { bytes, container, labels, infos: new Map(), cache, drawn: new Map() }
     if (!container.collection) {
@@ -319,24 +319,18 @@ export class App {
     this.applyStyle()
   }
 
-  /** ArrayBuffer first; a data: URL (allowed by the frame's font-src) if Chromium refuses it. */
+  /**
+   * Hands the bytes to Chromium as an ArrayBuffer. When it refuses them there is no second try:
+   * a data: URL of the same bytes would only repeat the refusal, after encoding them all again.
+   */
   private async loadFontFace(bytes: Uint8Array, loaded: Loaded): Promise<{ family: string } | { error: string }> {
     const family = `fv-face-${++serial}`
-    const buffer = bytes.slice().buffer
-    let firstError: unknown
     try {
-      const face = new FontFace(family, buffer)
+      const face = new FontFace(family, bytes.slice().buffer)
       await face.load()
       return this.adopt(face, family, loaded)
     } catch (error) {
-      firstError = error
-    }
-    try {
-      const face = new FontFace(family, `url(data:${fontMime(bytes)};base64,${base64(bytes)})`)
-      await face.load()
-      return this.adopt(face, family, loaded)
-    } catch {
-      return { error: describeError(firstError) }
+      return { error: describeError(error) }
     }
   }
 
@@ -383,10 +377,3 @@ function describeError(error: unknown): string {
   return String(error)
 }
 
-function base64(bytes: Uint8Array): string {
-  let text = ''
-  for (let i = 0; i < bytes.length; i += 0x8000) {
-    text += String.fromCharCode(...bytes.subarray(i, i + 0x8000))
-  }
-  return btoa(text)
-}

@@ -4,7 +4,7 @@
 import { embeddingLabel, formatBytes, formatDate, formatNumber, weightLabel, widthLabel } from '../describe'
 import type { Face, FontContainer } from '../font/container'
 import type { FaceInfo, NameKey } from '../font/info'
-import type { Language, Strings } from '../i18n'
+import { type Language, type Strings, fill } from '../i18n'
 import { icon } from '../icons'
 import { h, html } from './dom'
 
@@ -45,8 +45,8 @@ export class InfoTab {
     const os2 = info.os2
     const hhea = info.hhea
     const style: Row[] = [
-      [s.weightClass, os2 ? weightLabel(os2.weightClass) : null],
-      [s.widthClass, os2 ? widthLabel(os2.widthClass) : null],
+      [s.weightClass, os2 ? weightLabel(os2.weightClass, language) : null],
+      [s.widthClass, os2 ? widthLabel(os2.widthClass, language) : null],
       [s.italicAngle, info.post ? `${number(info.post.italicAngle)}°` : null],
       [s.monospace, info.monospace ? s.yes : s.no],
       [s.unitsPerEm, info.head ? number(info.head.unitsPerEm) : null],
@@ -87,7 +87,7 @@ export class InfoTab {
       [s.fileSize, `${formatBytes(container.fileSize, language)} (${number(container.fileSize)})`],
       [s.glyphs, info.glyphCount !== null ? number(info.glyphCount) : null],
       [s.characters, number(info.cmap.codes.length)],
-      [s.cmapSource, info.cmap.source ? `${info.cmap.source}${info.cmap.symbol ? ' (symbol)' : ''}` : null, true],
+      [s.cmapSource, info.cmap.source ? (info.cmap.symbol ? fill(s.cmapSymbol, { source: info.cmap.source }) : info.cmap.source) : null, true],
       [s.color, info.color.length ? info.color.join(', ') : null],
       [s.created, info.head?.created != null ? formatDate(info.head.created, language) : null],
       [s.modified, info.head?.modified != null ? formatDate(info.head.modified, language) : null],

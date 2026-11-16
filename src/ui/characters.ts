@@ -7,6 +7,7 @@ import {
   blockOf,
   charOf,
   cssEscape,
+  fontBlockNames,
   hex,
   htmlEntity,
   isInvisible,
@@ -17,7 +18,19 @@ import {
   utf8Bytes
 } from '../font/chars'
 import type { FaceInfo } from '../font/info'
-import { type BlockGroup, type GridLayout, type GridMove, type GridPosition, groupByBlock, layoutGrid, moveInGrid, rowOf, visibleRange } from '../grid'
+import {
+  type BlockGroup,
+  type GridLayout,
+  type GridMove,
+  type GridPosition,
+  blockOptions,
+  groupByBlock,
+  inBlockFilter,
+  layoutGrid,
+  moveInGrid,
+  rowOf,
+  visibleRange
+} from '../grid'
 import { type Language, type Strings, fill } from '../i18n'
 import { icon } from '../icons'
 import { append, copyText, h, html, selectText, toast } from './dom'
@@ -33,7 +46,7 @@ const GLYPH_BOX = 148
 
 export type CharactersState = {
   query: string
-  /** A block name, or '' for every block. */
+  /** A block name, NO_BLOCK for the gaps between blocks, or '' for every block. */
   block: string
   selected: number | null
 }
@@ -72,6 +85,8 @@ export class CharactersTab {
   private readonly detail = h('aside', { class: 'fv-detail fv-hidden' })
   private readonly empty = h('div', { class: 'fv-empty fv-hidden' })
   private info: FaceInfo | null = null
+  /** The face's block names in English and the UI language: words matching one are a block search. */
+  private blockNames: string[] = []
   private groups: BlockGroup[] = []
   private layout: GridLayout = { rows: [], height: 0, total: 0 }
   private columns = 0
@@ -132,14 +147,18 @@ export class CharactersTab {
     this.info = info
     const s = this.host.strings
     this.search.value = this.state.query
-    const all = groupByBlock(info.cmap.codes)
+    const options = blockOptions(groupByBlock(info.cmap.codes))
+    this.blockNames = fontBlockNames(
+      options.map((option) => option.block),
+      this.host.language
+    )
     this.blockSelect.replaceChildren(h('option', { value: '' }, s.allBlocks))
-    for (const group of all) {
+    for (const option of options) {
       this.blockSelect.append(
-        h('option', { value: group.block }, `${blockLabel(group.block, this.host.language, s.noBlock)} (${group.codes.length})`)
+        h('option', { value: option.value }, `${blockLabel(option.block, this.host.language, s.noBlock)} (${option.count})`)
       )
     }
-    if (!all.some((group) => group.block === this.state.block)) this.state.block = ''
+    if (!options.some((option) => option.value === this.state.block)) this.state.block = ''
     this.blockSelect.value = this.state.block
     this.dirty = true
     if (this.visible) this.refilter()
@@ -158,7 +177,7 @@ export class CharactersTab {
     if (!info) return
     this.dirty = false
     const s = this.host.strings
-    const query = parseCharQuery(this.state.query)
+    const query = parseCharQuery(this.state.query, this.blockNames)
     const block = this.state.block
     const language = this.host.language
     const labels = new Map<string, string>()
@@ -170,7 +189,7 @@ export class CharactersTab {
       }
       return label
     }
-    this.groups = groupByBlock(info.cmap.codes, (code, name) => (!block || name === block) && matchesQuery(query, code, name, labelOf(name)))
+    this.groups = groupByBlock(info.cmap.codes, (code, name) => inBlockFilter(block, name) && matchesQuery(query, code, name, labelOf(name)))
     const total = info.cmap.codes.length
     this.relayout()
     this.count.textContent = fill(s.charsCount, {

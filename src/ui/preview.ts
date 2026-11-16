@@ -1,7 +1,7 @@
 // The Preview tab: an editable sample at any size, a waterfall of sizes, the alphabet lines the
 // font covers, and (beside them) variable axes and OpenType feature switches.
 
-import { alphabetLines, formatNumber } from '../describe'
+import { alphabetLines, formatFixed, formatNumber } from '../describe'
 import { compareFeatures, featureName, isOnByDefault, isUserFeature } from '../font/features'
 import { snapAxisValue } from '../render'
 import type { AxisInfo, FaceInfo } from '../font/info'
@@ -128,7 +128,7 @@ export class PreviewTab {
         )
       )
     }
-    const lineHeight = this.rangeControl(s.lineHeight, 0.8, 2.5, 0.05, this.state.lineHeight, (value) => value.toFixed(2), (value) => {
+    const lineHeight = this.rangeControl(s.lineHeight, 0.8, 2.5, 0.05, this.state.lineHeight, (value) => formatFixed(value, 2, this.host.language), (value) => {
       this.state.lineHeight = value
       this.applySize()
     })

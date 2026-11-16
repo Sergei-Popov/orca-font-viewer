@@ -16,6 +16,12 @@ npx esbuild brotli-entry.js --bundle --format=esm --platform=browser --outfile=v
 | `brotli/brotli.mjs`     | brotli.js 2.1.0 decompressor (WOFF 2.0), **modified** | MIT; Google decoder Apache-2.0 |
 | `brotli/dictionary.mjs` | the Brotli static dictionary as a word list           | MIT (google/brotli)            |
 
+Upstream:
+
+- fflate: https://github.com/101arrowz/fflate (npm `fflate` 0.8.3)
+- brotli.js: https://github.com/foliojs/brotli.js (formerly devongovett/brotli.js; npm `brotli` 2.1.0)
+- Brotli static dictionary: https://github.com/google/brotli (v1.1.0)
+
 ## The Brotli dictionary
 
 Brotli needs its 122,784-byte static dictionary (RFC 7932, Appendix A). brotli.js embeds it as a

@@ -137,21 +137,31 @@ export function blockNameMatches(query: string, name: string): boolean {
   return words.length > 0 && words.every((word) => target.includes(word))
 }
 
-/** Every block name the search knows, in English and Russian. */
-const BLOCK_LABELS = [...new Set([...BLOCK_STARTS.map(([, name]) => name).filter(Boolean), ...Object.values(BLOCK_NAMES_RU)])]
-
-function matchesSomeBlock(text: string): boolean {
-  return BLOCK_LABELS.some((name) => blockNameMatches(text, name))
+/**
+ * The names a block search may match for a font: those of the blocks it has characters in, in
+ * English and in the UI language.
+ */
+export function fontBlockNames(blocks: Iterable<string>, language: 'en' | 'ru'): string[] {
+  const names = new Set<string>()
+  for (const block of blocks) {
+    if (!block) continue
+    names.add(block)
+    names.add(blockLabel(block, language, block))
+  }
+  return [...names]
 }
 
 const RANGE = /^(u\+|0x)?([0-9a-f]{1,6})\s*(?:-|–|—|\.\.|…)\s*(?:u\+|0x)?([0-9a-f]{1,6})$/i
 
 /**
  * What the Characters search box asks for: "U+0041", "u+41", "0x41", a range ("U+0400-04FF",
- * "U+0400..U+04FF", "400-4FF"), words of a block name ("cyrillic", "latin-1", "IPA ext",
- * "кирил"), or typed characters ("Ёж"). Text that holds nothing to search for shows everything.
+ * "U+0400..U+04FF", "400-4FF"), words of a block name ("cyrillic", "latin-1", "IPA ext", and
+ * "кирил" in the Russian UI), or typed characters ("Ёж", "ffi", a word or a sentence). Words are a
+ * block search only when they match one of `blockNames` (the font's own blocks: see
+ * fontBlockNames); otherwise they are the characters typed. Text that holds nothing to search for
+ * shows everything.
  */
-export function parseCharQuery(input: string): CharQuery {
+export function parseCharQuery(input: string, blockNames: readonly string[]): CharQuery {
   const text = input.trim()
   const parts = text.split(/[\s,]+/).filter(Boolean)
   if (!parts.length) return { kind: 'all' }
@@ -165,16 +175,13 @@ export function parseCharQuery(input: string): CharQuery {
   if (parts.every((part) => /^(u\+|0x)[0-9a-f]{1,6}$/i.test(part))) {
     return { kind: 'codes', codes: new Set(parts.map((part) => parseInt(part.slice(2), 16))) }
   }
-  // Words: a block name when one matches ("latin-1", "box draw", "Thai"), else typed characters.
+  // Words: a block of the font when one matches ("latin-1", "box draw", "Thai"), else the typed
+  // characters, however many.
   const wordy = /[\s-]/.test(text) || /^[\p{L}'’]{3,}$/u.test(text)
-  if (wordy && matchesSomeBlock(text)) {
+  if (wordy && blockNames.some((name) => blockNameMatches(text, name))) {
     return { kind: 'block', text: normalize(text) }
   }
-  const letters = [...parts.join('')]
-  if (letters.length <= 8) {
-    return { kind: 'codes', codes: new Set(letters.map((c) => c.codePointAt(0)!)) }
-  }
-  return { kind: 'block', text: normalize(text) }
+  return { kind: 'codes', codes: new Set([...parts.join('')].map((c) => c.codePointAt(0)!)) }
 }
 
 /** Whether `code` (in `block`, shown as `label`) matches the query. */

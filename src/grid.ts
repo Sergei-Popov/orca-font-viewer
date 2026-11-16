@@ -29,6 +29,32 @@ export function groupByBlock(codes: Uint32Array, keep: (code: number, block: str
   return groups
 }
 
+/** The block filter's value for code points outside every block ('' is every block). */
+export const NO_BLOCK = '-'
+
+export type BlockOption = { value: string; block: string; count: number }
+
+/**
+ * The block filter's options: one per block in code point order, then a single one for all the
+ * code points that fall in gaps between blocks.
+ */
+export function blockOptions(groups: readonly BlockGroup[]): BlockOption[] {
+  const options: BlockOption[] = []
+  const gaps: BlockOption = { value: NO_BLOCK, block: '', count: 0 }
+  for (const group of groups) {
+    if (group.block === '') gaps.count += group.codes.length
+    else options.push({ value: group.block, block: group.block, count: group.codes.length })
+  }
+  if (gaps.count > 0) options.push(gaps)
+  return options
+}
+
+/** Whether a code point of `block` passes the block filter `value`. */
+export function inBlockFilter(value: string, block: string): boolean {
+  if (value === '') return true
+  return value === NO_BLOCK ? block === '' : block === value
+}
+
 const STARTS = BLOCK_STARTS.map(([first]) => first)
 
 /** The first code point after `code`'s block (or gap); 0x110000 at the end. */

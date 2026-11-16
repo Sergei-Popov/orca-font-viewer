@@ -40,8 +40,11 @@ All notable changes to this plugin are documented here. The format follows
     retries the same bytes as a `data:` URL.
 - The block filter's "No block" option showed every character; all the gaps between blocks now
   share one option that shows only them.
-- Monospaced fonts whose `post` table does not say so (Noto Sans Mono) get the Monospaced badge,
-  by OS/2 PANOSE or by equal widths of their printable ASCII characters.
+- Monospaced fonts whose `post` table does not say so (Noto Sans Mono, Roboto Mono, Monaco,
+  Courier) get the Monospaced badge, by OS/2 PANOSE or by their widths: at least 90 of the 94
+  printable ASCII characters, each on a glyph of its own, nearly all one width, and that width also
+  the width of at least 80% of the glyphs the font maps. Emoji fonts (only `#*0-9` in ASCII),
+  fallback fonts (one glyph for everything) and dual-width CJK fonts are not counted.
 - Russian UI: weight and width classes have Russian names, the symbol font note and the reason a
   face cannot be shown are translated, and the line height uses a decimal comma.
 - README and code comments gave Orca's limit for plugin editors as 64 MiB; it is 50 MiB. The README

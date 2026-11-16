@@ -54,8 +54,10 @@ follows Orca's language (English or Russian) and its light and dark themes.
 - **WOFF 2.0 collections** whose outlines are stored transformed draw only their first face; the
   other faces show their characters and details in a fallback font.
 - **Monospaced** is shown when `post` says so, when OS/2 PANOSE says Latin Text with Monospaced
-  proportion, or when nearly all printable ASCII characters have one width; a monospaced font
-  without Latin letters is not recognised.
+  proportion, or when at least 90 printable ASCII characters, each on a glyph of its own, nearly
+  all have one width that is also the width of at least 80% of the glyphs the font maps. A
+  monospaced font without Latin letters is not recognised, and dual-width CJK fonts (half-width
+  Latin, full-width ideographs) are not called monospaced.
 - **Bounds for damaged or hostile files.** Names used as labels are cut at 256 characters (the Info
   tab shows them whole), at most 1,000 named instances are read, one `name` table decodes at most
   4 MiB of text, a character map stops after twice as many steps as Unicode has code points, and

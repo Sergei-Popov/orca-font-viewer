@@ -6,8 +6,8 @@ import { loadBrotliDictionary } from './brotli-dictionary'
 import { FontError } from './bytes'
 import { faceToSfnt, openFont } from './container'
 import { describeFace, faceLabel, newTableCache } from './info'
-import { parseCmap, parseFvar, parseName, trimNuls } from './tables'
-import { Bytes, collection, ttfFixture, utf16 } from './test-fonts'
+import { LABEL_MAX, MAX_INSTANCES, MAX_NAME_DECODE_BYTES, parseCmap, parseFvar, parseName, trimNuls } from './tables'
+import { Bytes, buildFont, sfnt as buildSfnt, collection, ttfFixture, utf16 } from './test-fonts'
 
 const isDamaged = (pattern?: RegExp) => (error: unknown) =>
   error instanceof FontError && error.code === 'damaged' && (!pattern || pattern.test(error.message))
@@ -226,6 +226,40 @@ test('name: blank records are skipped for the next best', () => {
     ])
   )
   assert.equal(names.pick(1, 'en'), 'ÄA')
+})
+
+test('fvar: at most 1,000 named instances are read', () => {
+  const table = parseFvar(fvar(1, 1500, 8, 1500))
+  assert.equal(MAX_INSTANCES, 1000)
+  assert.equal(table.instances.length, 1000)
+  assert.equal(table.skippedInstances, 500)
+})
+
+test('name: names used as labels are cut at 256 characters; the Info tab keeps them whole', () => {
+  const family = 'Long Family '.repeat(40) // 480 characters
+  const info = describeFace(openFont(buildSfnt(buildFont({ family: family.trim() }))).faces[0], 'en')
+  assert.equal(info.family.length, LABEL_MAX)
+  assert.ok(info.family.endsWith('…'))
+  assert.ok(family.startsWith(info.family.slice(0, -1)))
+  assert.equal(info.names.family, family.trim())
+  // An emoji (a surrogate pair) at the cut is dropped whole, never split.
+  const emoji = parseName(nameTable([[3, 1, 0x409, 1, utf16(`${'a'.repeat(LABEL_MAX - 2)}😀😀😀`)]]))
+  const cut = emoji.label(1, 'en')!
+  assert.equal(cut, `${'a'.repeat(LABEL_MAX - 2)}…`)
+})
+
+test('name: one table decodes at most 4 MiB of strings', () => {
+  // 200 records, each a different 65,000-byte slice of the same storage: 13 MB if all decoded.
+  const count = 200
+  const storage = 6 + count * 12
+  const out = new Bytes().u16(0, count, storage)
+  for (let i = 0; i < count; i++) out.u16(3, 1, 0x409, 300 + i, 65000, i * 2)
+  for (let i = 0; i < 65000 / 2 + count; i++) out.u16(0x41)
+  const names = parseName(out.done())
+  let found = 0
+  for (let i = 0; i < count; i++) if (names.pick(300 + i, 'en')) found++
+  assert.ok(names.decodedBytes <= MAX_NAME_DECODE_BYTES)
+  assert.equal(found, Math.floor(MAX_NAME_DECODE_BYTES / 65000))
 })
 
 // ------------------------------------------------------------------------------------------------

@@ -136,7 +136,7 @@ function readNames(face: Face, problems: string[], cache: TableCache): NameTable
 export function faceLabel(face: Face, index: number, uiLanguage: string, cache: TableCache = newTableCache()): string {
   if (face.error) return `#${index + 1}`
   const names = readNames(face, [], cache)
-  const pick = (id: number) => names?.pick(id, uiLanguage) ?? null
+  const pick = (id: number) => names?.label(id, uiLanguage) ?? null
   const label =
     pick(NAME_IDS.fullName) ??
     [pick(NAME_IDS.typographicFamily) ?? pick(NAME_IDS.family), pick(NAME_IDS.typographicSubfamily) ?? pick(NAME_IDS.subfamily)]
@@ -158,6 +158,8 @@ export function describeFace(face: Face, uiLanguage: string, cache: TableCache =
 
   const names = readNames(face, problems, cache)
   const name = (id: number) => names?.pick(id, uiLanguage) ?? null
+  // Names the UI shows as labels are cut to LABEL_MAX characters; the Info tab shows them whole.
+  const label = (id: number) => names?.label(id, uiLanguage) ?? null
   const nameValues: Partial<Record<NameKey, string>> = {}
   for (const [key, id] of Object.entries(NAME_IDS) as [NameKey, number][]) {
     const value = name(id)
@@ -185,14 +187,14 @@ export function describeFace(face: Face, uiLanguage: string, cache: TableCache =
   }
   const axes: AxisInfo[] = (fvar?.axes ?? []).map((axis) => ({
     tag: axis.tag,
-    name: name(axis.nameId) ?? axis.tag,
+    name: label(axis.nameId) ?? axis.tag,
     min: axis.min,
     default: axis.default,
     max: axis.max,
     hidden: axis.hidden
   }))
   const instances: InstanceInfo[] = (fvar?.instances ?? []).map((instance, i) => ({
-    name: name(instance.nameId) ?? `#${i + 1}`,
+    name: label(instance.nameId) ?? `#${i + 1}`,
     coordinates: instance.coordinates
   }))
 
@@ -203,7 +205,7 @@ export function describeFace(face: Face, uiLanguage: string, cache: TableCache =
     const list: FeatureEntry[] = attempt(problems, tag, () => cached(cache, tag, bytes, () => parseFeatureList(bytes))) ?? []
     for (const entry of list) {
       const existing = features.get(entry.tag)
-      const uiName = entry.uiNameId !== null ? name(entry.uiNameId) : null
+      const uiName = entry.uiNameId !== null ? label(entry.uiNameId) : null
       if (existing) {
         existing.table = existing.table === tag ? tag : 'both'
         existing.uiName ??= uiName
@@ -241,8 +243,8 @@ export function describeFace(face: Face, uiLanguage: string, cache: TableCache =
   }
 
   return {
-    family: nameValues.typographicFamily ?? nameValues.family ?? '',
-    style: nameValues.typographicSubfamily ?? nameValues.subfamily ?? '',
+    family: label(NAME_IDS.typographicFamily) ?? label(NAME_IDS.family) ?? '',
+    style: label(NAME_IDS.typographicSubfamily) ?? label(NAME_IDS.subfamily) ?? '',
     names: nameValues,
     outlines,
     sfntVersion: describeSfntVersion(face.sfntVersion),

@@ -63,17 +63,24 @@ const MAC_LANGUAGES: Record<number, string> = {
 
 /** Records a name lookup tries before giving up on blank strings. */
 const MAX_TRIES = 8
+/** Names used as labels (instances, axes, features, the header, the face picker) are cut here. */
+export const LABEL_MAX = 256
+/** Bytes of strings one name table decodes at most; real tables hold a few kilobytes. */
+export const MAX_NAME_DECODE_BYTES = 4 * 1024 * 1024
 /** Language tags are short; a longer one is cut, not decoded whole. */
 const MAX_TAG_BYTES = 64
 
 /**
  * A name table: records indexed by name id; strings are decoded on demand, once per (encoding,
- * offset, length), so a table of thousands of records sharing one long string stays cheap.
+ * offset, length), so a table of thousands of records sharing one long string stays cheap. All
+ * the strings one table decodes add up to at most MAX_NAME_DECODE_BYTES; past that a string reads
+ * as blank.
  */
 export class NameTable {
   private readonly byId = new Map<number, NameRecord[]>()
   private readonly strings = new Map<string, string>()
   private readonly picked = new Map<string, string | null>()
+  private decoded = 0
   readonly size: number
 
   constructor(
@@ -94,14 +101,28 @@ export class NameTable {
     return this.strings.size
   }
 
-  /** The decoded string of a record, without trailing NULs. */
-  text(record: NameRecord): string {
+  /** Bytes of string storage decoded so far. */
+  get decodedBytes(): number {
+    return this.decoded
+  }
+
+  /**
+   * The decoded string of a record, without trailing NULs; with `maxChars`, only enough of its
+   * bytes for that many characters and one more are decoded.
+   */
+  text(record: NameRecord, maxChars = Infinity): string {
     const mac = record.platformId === 1
-    const key = `${mac ? 'm' : 'u'}:${record.offset}:${record.length}`
+    const length = Math.min(record.length, mac ? maxChars + 1 : (maxChars + 1) * 2)
+    const key = `${mac ? 'm' : 'u'}:${record.offset}:${length}`
     let value = this.strings.get(key)
     if (value === undefined) {
-      const raw = this.reader.slice(this.storage + record.offset, record.length)
-      value = trimNuls(mac ? decodeMacRoman(raw) : decodeUtf16(raw))
+      if (this.decoded + length > MAX_NAME_DECODE_BYTES) {
+        value = ''
+      } else {
+        this.decoded += length
+        const raw = this.reader.slice(this.storage + record.offset, length)
+        value = trimNuls(mac ? decodeMacRoman(raw) : decodeUtf16(raw))
+      }
       this.strings.set(key, value)
     }
     return value
@@ -111,9 +132,9 @@ export class NameTable {
    * The best string for `nameId`: the UI language first, then English, then anything, preferring
    * Windows/Unicode records over Mac ones at each step; blank strings are skipped.
    */
-  pick(nameId: number, uiLanguage: string): string | null {
+  pick(nameId: number, uiLanguage: string, maxChars = Infinity): string | null {
     const ui = uiLanguage.toLowerCase().split('-')[0]
-    const cacheKey = `${nameId}:${ui}`
+    const cacheKey = `${nameId}:${ui}:${maxChars}`
     const cached = this.picked.get(cacheKey)
     if (cached !== undefined) return cached
     const candidates = (this.byId.get(nameId) ?? []).map((record, order) => {
@@ -128,7 +149,7 @@ export class NameTable {
     candidates.sort((a, b) => b.score - a.score || a.order - b.order)
     let result: string | null = null
     for (const { record } of candidates.slice(0, MAX_TRIES)) {
-      const value = this.text(record)
+      const value = this.text(record, maxChars)
       if (value.trim()) {
         result = value
         break
@@ -137,6 +158,21 @@ export class NameTable {
     this.picked.set(cacheKey, result)
     return result
   }
+
+  /** `pick` for a label: at most LABEL_MAX characters, the last one an ellipsis when cut. */
+  label(nameId: number, uiLanguage: string): string | null {
+    const value = this.pick(nameId, uiLanguage, LABEL_MAX)
+    return value === null ? null : capLabel(value)
+  }
+}
+
+/** `text` cut to LABEL_MAX characters, ending in "…", without splitting a surrogate pair. */
+export function capLabel(text: string): string {
+  if (text.length <= LABEL_MAX) return text
+  let end = LABEL_MAX - 1
+  const last = text.charCodeAt(end - 1)
+  if (last >= 0xd800 && last <= 0xdbff) end--
+  return `${text.slice(0, end)}…`
 }
 
 export function parseName(bytes: Uint8Array): NameTable {
@@ -542,10 +578,13 @@ export type FvarTable = {
 
 /** More axes than any real font has; each one becomes a slider. */
 const MAX_AXES = 64
+/** Named instances read at most; real fonts have tens, a few hundred at the most. */
+export const MAX_INSTANCES = 1000
 
 /**
  * The variation axes and named instances. Record sizes are checked against the spec (an instance
- * is 4 + 4·axes bytes, or 6 more with a PostScript name id) and `maxWork` bounds instances × axes.
+ * is 4 + 4·axes bytes, or 6 more with a PostScript name id); at most MAX_INSTANCES instances are
+ * read, and `maxWork` bounds instances × axes.
  */
 export function parseFvar(bytes: Uint8Array, maxWork = 65536): FvarTable {
   const r = new Reader(bytes)
@@ -581,7 +620,7 @@ export function parseFvar(bytes: Uint8Array, maxWork = 65536): FvarTable {
   }
   const instancesAt = axesOffset + axisCount * axisSize
   const fit = instanceSize > 0 ? Math.max(0, Math.floor((r.length - instancesAt) / instanceSize)) : 0
-  const readable = Math.min(instanceCount, fit, Math.floor(maxWork / Math.max(1, axisCount)))
+  const readable = Math.min(instanceCount, fit, MAX_INSTANCES, Math.floor(maxWork / Math.max(1, axisCount)))
   const hasPsName = instanceSize === plainSize + 2
   const instances: NamedInstance[] = []
   for (let i = 0; i < readable; i++) {

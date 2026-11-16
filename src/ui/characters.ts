@@ -7,6 +7,7 @@ import {
   blockOf,
   charOf,
   cssEscape,
+  fontBlockNames,
   hex,
   htmlEntity,
   isInvisible,
@@ -84,6 +85,8 @@ export class CharactersTab {
   private readonly detail = h('aside', { class: 'fv-detail fv-hidden' })
   private readonly empty = h('div', { class: 'fv-empty fv-hidden' })
   private info: FaceInfo | null = null
+  /** The face's block names in English and the UI language: words matching one are a block search. */
+  private blockNames: string[] = []
   private groups: BlockGroup[] = []
   private layout: GridLayout = { rows: [], height: 0, total: 0 }
   private columns = 0
@@ -145,6 +148,10 @@ export class CharactersTab {
     const s = this.host.strings
     this.search.value = this.state.query
     const options = blockOptions(groupByBlock(info.cmap.codes))
+    this.blockNames = fontBlockNames(
+      options.map((option) => option.block),
+      this.host.language
+    )
     this.blockSelect.replaceChildren(h('option', { value: '' }, s.allBlocks))
     for (const option of options) {
       this.blockSelect.append(
@@ -170,7 +177,7 @@ export class CharactersTab {
     if (!info) return
     this.dirty = false
     const s = this.host.strings
-    const query = parseCharQuery(this.state.query)
+    const query = parseCharQuery(this.state.query, this.blockNames)
     const block = this.state.block
     const language = this.host.language
     const labels = new Map<string, string>()

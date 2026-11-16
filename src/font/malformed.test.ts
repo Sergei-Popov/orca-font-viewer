@@ -4,8 +4,8 @@
 import { assert, test } from 'orca/testing'
 import { loadBrotliDictionary } from './brotli-dictionary'
 import { FontError } from './bytes'
-import { faceToSfnt, openFont } from './container'
-import { describeFace, faceLabel, newTableCache } from './info'
+import { MAX_FACES, faceToSfnt, openFont } from './container'
+import { describeFace, faceLabel, faceLabels, newTableCache } from './info'
 import { LABEL_MAX, MAX_INSTANCES, MAX_NAME_DECODE_BYTES, parseCmap, parseFvar, parseName, trimNuls } from './tables'
 import { Bytes, buildFont, sfnt as buildSfnt, collection, ttfFixture, utf16 } from './test-fonts'
 
@@ -353,6 +353,62 @@ test('collection: a face that cannot be read is marked; the others open', () => 
   // Faces sharing a cmap share one parse.
   assert.equal(describeFace(opened.faces[0], 'en', cache).cmap, describeFace(opened.faces[2], 'en', cache).cmap)
   assert.throws(() => openFont(collection([font], () => [0xfffff0, 0xfffff4], 2)), isDamaged(/no face of the collection/))
+})
+
+/** A name table of `count` records: full name "Shared Face", then filler names. */
+function bigName(count: number): Uint8Array {
+  return nameTable([[3, 1, 0x409, 4, utf16('Shared Face')], ...Array.from({ length: count - 1 }, (_, i) => [3, 1, 0x409, 1000 + i, utf16('x')] as [number, number, number, number, Uint8Array])])
+}
+
+/**
+ * A collection of faces that have only a name table: `copies` copies of `name` lie one after
+ * another (with `slack` spare bytes after the last), and face i points at `place(i, starts)`.
+ */
+function nameCollection(name: Uint8Array, faces: number, copies: number, place: (i: number, starts: number[]) => [offset: number, length: number], slack = 0): Uint8Array {
+  const dataAt = 12 + faces * 4 + faces * 28
+  const starts = Array.from({ length: copies }, (_, c) => dataAt + c * ((name.length + 3) & ~3))
+  const out = new Bytes().tag('ttcf').u32(0x00010000, faces)
+  for (let i = 0; i < faces; i++) out.u32(12 + faces * 4 + i * 28)
+  for (let i = 0; i < faces; i++) {
+    const [offset, length] = place(i, starts)
+    out.u32(0x00010000).u16(1, 16, 0, 0).tag('name').u32(0, offset, length)
+  }
+  for (let c = 0; c < copies; c++) {
+    out.bytes(name)
+    while (out.length % 4) out.u8(0)
+  }
+  return out.bytes(new Uint8Array(slack)).done()
+}
+
+test('collection: faces naming one name table with different lengths parse it once', () => {
+  // 50 faces give the same start and lengths that differ by one: one parse of 1,000 records.
+  const name = bigName(1000)
+  const bytes = nameCollection(name, 50, 1, (i, starts) => [starts[0], name.length + i], 64)
+  const labels = faceLabels(openFont(bytes).faces, 'en', newTableCache(), 5000)
+  assert.deepEqual(labels, Array(50).fill('Shared Face'))
+})
+
+test('collection: face labels share one budget; once it is spent, faces are labelled #n', () => {
+  // 20 copies of a 1,000-record name table, one per face: the budget pays for four parses.
+  const name = bigName(1000)
+  const bytes = nameCollection(name, 20, 20, (i, starts) => [starts[i], name.length])
+  const labels = faceLabels(openFont(bytes).faces, 'en', newTableCache(), 5000)
+  assert.deepEqual(labels.slice(0, 4), Array(4).fill('Shared Face'))
+  assert.deepEqual(labels.slice(4), Array.from({ length: 16 }, (_, i) => `#${i + 5}`))
+  // The real budget labels every face of an ordinary collection.
+  assert.deepEqual(faceLabels(openFont(bytes).faces, 'en'), Array(20).fill('Shared Face'))
+})
+
+test('WOFF2: a collection listing more than 10,000 faces is refused', async () => {
+  await loadBrotliDictionary()
+  const woff2 = (faces: number) =>
+    new Bytes()
+      .tag('wOF2').tag('ttcf').u32(0).u16(1, 0).u32(0, 0).u16(1, 0).u32(0, 0, 0, 0, 0) // header
+      .u8(1, 54) // head, 54 bytes
+      .u32(0x00010000).u8(253).u16(faces) // collection header: version, numFonts as 255UInt16
+      .done()
+  assert.equal(MAX_FACES, 10000)
+  assert.throws(() => openFont(woff2(MAX_FACES + 1)), isDamaged(/collection lists 10001 fonts/))
 })
 
 // ------------------------------------------------------------------------------------------------

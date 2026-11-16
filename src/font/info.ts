@@ -69,12 +69,22 @@ export type FaceInfo = {
 
 /**
  * Parsed tables, shared by the faces of a collection: faces often point at the same name or cmap
- * table, and a hostile collection may point hundreds of faces at one expensive table.
+ * table, and a hostile collection may point hundreds of faces at one expensive table. A name
+ * table is known by where it starts alone, so faces that give the same start with different
+ * lengths share one parse too.
  */
 export type TableCache = WeakMap<ArrayBufferLike, Map<string, unknown>>
 
 export function newTableCache(): TableCache {
   return new WeakMap()
+}
+
+function cacheKey(tag: string, bytes: Uint8Array): string {
+  return tag === 'name' ? `name:${bytes.byteOffset}` : `${tag}:${bytes.byteOffset}:${bytes.byteLength}`
+}
+
+function isCached(cache: TableCache, tag: string, bytes: Uint8Array): boolean {
+  return cache.get(bytes.buffer)?.has(cacheKey(tag, bytes)) ?? false
 }
 
 function cached<T>(cache: TableCache, tag: string, bytes: Uint8Array, parse: () => T): T {
@@ -83,7 +93,7 @@ function cached<T>(cache: TableCache, tag: string, bytes: Uint8Array, parse: () 
     perBuffer = new Map()
     cache.set(bytes.buffer, perBuffer)
   }
-  const key = `${tag}:${bytes.byteOffset}:${bytes.byteLength}`
+  const key = cacheKey(tag, bytes)
   if (perBuffer.has(key)) {
     const hit = perBuffer.get(key)
     if (hit instanceof Error) throw hit
@@ -143,6 +153,34 @@ export function faceLabel(face: Face, index: number, uiLanguage: string, cache: 
       .filter(Boolean)
       .join(' ')
   return label || `#${index + 1}`
+}
+
+/** What the collection picker's labels may cost over all faces: name records parsed plus bytes decoded. */
+export const LABEL_BUDGET = 1 << 18
+
+/**
+ * The collection picker's label of every face. Together they cost at most `budget` (name records
+ * parsed plus string bytes decoded); once it is spent, the faces left are labelled "#n".
+ */
+export function faceLabels(faces: readonly Face[], uiLanguage: string, cache: TableCache = newTableCache(), budget = LABEL_BUDGET): string[] {
+  let left = budget
+  return faces.map((face, index) => {
+    const bytes = face.tables.get('name')
+    if (face.error || !bytes || left <= 0) return `#${index + 1}`
+    if (!isCached(cache, 'name', bytes)) {
+      const records = bytes.byteLength >= 4 ? (bytes[2] << 8) | bytes[3] : 0
+      if (records > left) {
+        left = 0
+        return `#${index + 1}`
+      }
+      left -= records
+    }
+    const names = readNames(face, [], cache)
+    const before = names?.decodedBytes ?? 0
+    const label = faceLabel(face, index, uiLanguage, cache)
+    left -= (names?.decodedBytes ?? 0) - before
+    return label
+  })
 }
 
 export function describeFace(face: Face, uiLanguage: string, cache: TableCache = newTableCache()): FaceInfo {

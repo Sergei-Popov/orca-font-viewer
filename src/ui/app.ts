@@ -5,7 +5,7 @@ import { defaultSample } from '../describe'
 import { FontError } from '../font/bytes'
 import { loadBrotliDictionary } from '../font/brotli-dictionary'
 import { type FontContainer, needsBrotliDictionary, openFont } from '../font/container'
-import { type FaceInfo, type TableCache, describeFace, faceLabel, newTableCache } from '../font/info'
+import { type FaceInfo, type TableCache, describeFace, faceLabels, newTableCache } from '../font/info'
 import { type Language, type Strings, fill } from '../i18n'
 import { icon } from '../icons'
 import { axesFor, faceStyle, fontMime, renderSource } from '../render'
@@ -147,11 +147,11 @@ export class App {
       return
     }
     const cache = newTableCache()
+    // Labels for the face picker, under one budget for all faces ("#n" once it is spent).
     const labels = container.collection
-      ? container.faces.map((face, i) => {
-          const label = faceLabel(face, i, this.language, cache)
-          return face.error ? fill(s.faceDamaged, { label }) : label
-        })
+      ? faceLabels(container.faces, this.language, cache).map((label, i) =>
+          container.faces[i].error ? fill(s.faceDamaged, { label }) : label
+        )
       : []
     const loaded: Loaded = { bytes, container, labels, infos: new Map(), cache, drawn: new Map() }
     if (!container.collection) {

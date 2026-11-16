@@ -2,8 +2,10 @@
 // collections, WOFF 1.0 (zlib per table) and WOFF 2.0 (one Brotli stream). The result is each
 // face's tables as plain bytes, which src/font/tables.ts reads. WOFF2's transformed glyf, loca and
 // hmtx are not rebuilt: the viewer never reads glyph outlines, Chromium draws the font itself.
+// WOFF 2.0 needs the Brotli dictionary: `loadBrotliDictionary()` (./brotli-dictionary) must have
+// finished before `openFont` reads such a file; `needsBrotliDictionary` tells when it has not.
 
-import { decompress as brotliDecompress } from '../../vendor/brotli/brotli.mjs'
+import { decompress as brotliDecompress, hasDictionary } from '../../vendor/brotli/brotli.mjs'
 import { unzlibSync } from '../../vendor/fflate/fflate.mjs'
 import { FontError, Reader, tagValue } from './bytes'
 
@@ -71,6 +73,11 @@ export function sniffFlavor(bytes: Uint8Array): (Flavor | 'collection') | null {
   if (signature === TAG_WOFF) return 'woff'
   if (signature === TAG_WOF2) return 'woff2'
   return null
+}
+
+/** A WOFF 2.0 file that cannot be opened until the Brotli dictionary is loaded. */
+export function needsBrotliDictionary(bytes: Uint8Array): boolean {
+  return sniffFlavor(bytes) === 'woff2' && !hasDictionary()
 }
 
 export function openFont(bytes: Uint8Array, limits: Limits = DEFAULT_LIMITS): FontContainer {
@@ -311,6 +318,10 @@ function readWoff2(bytes: Uint8Array, limits: Limits): FontContainer {
     faceIndices = [{ sfntVersion: flavor, indices: entries.map((_, i) => i) }]
   }
 
+  if (!hasDictionary()) {
+    // A caller's mistake, not a damaged file: never shown as one.
+    throw new Error('the Brotli dictionary is not loaded; await loadBrotliDictionary() first')
+  }
   const compressed = r.slice(cursor.offset, totalCompressedSize)
   const expected = entries.reduce((sum, e) => sum + e.transformLength, 0)
   if (expected > limits.maxUnpackedBytes) {

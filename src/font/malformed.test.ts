@@ -1,54 +1,19 @@
-// Damaged and hostile fonts, built here byte by byte and kept small: limits that protect a 64 MiB
+// Damaged and malformed fonts, built here byte by byte and kept small: limits that protect a 64 MiB
 // file are passed in scaled down, so each case runs in milliseconds.
 
 import { assert, test } from 'orca/testing'
+import { loadBrotliDictionary } from './brotli-dictionary'
 import { FontError } from './bytes'
 import { faceToSfnt, openFont } from './container'
 import { describeFace, faceLabel, newTableCache } from './info'
 import { parseCmap, parseFvar, parseName, trimNuls } from './tables'
-import { ttfFixture } from './test-fixtures'
+import { Bytes, collection, ttfFixture, utf16 } from './test-fonts'
 
 const isDamaged = (pattern?: RegExp) => (error: unknown) =>
   error instanceof FontError && error.code === 'damaged' && (!pattern || pattern.test(error.message))
 
 // ------------------------------------------------------------------------------------------------
 // Builders
-
-class Bytes {
-  private parts: number[] = []
-  u8(...values: number[]): this {
-    for (const v of values) this.parts.push(v & 0xff)
-    return this
-  }
-  u16(...values: number[]): this {
-    for (const v of values) this.parts.push((v >> 8) & 0xff, v & 0xff)
-    return this
-  }
-  u32(...values: number[]): this {
-    for (const v of values) this.parts.push((v >>> 24) & 0xff, (v >>> 16) & 0xff, (v >>> 8) & 0xff, v & 0xff)
-    return this
-  }
-  tag(tag: string): this {
-    for (let i = 0; i < 4; i++) this.parts.push(tag.charCodeAt(i))
-    return this
-  }
-  bytes(data: ArrayLike<number>): this {
-    for (let i = 0; i < data.length; i++) this.parts.push(data[i])
-    return this
-  }
-  get length(): number {
-    return this.parts.length
-  }
-  done(): Uint8Array {
-    return Uint8Array.from(this.parts)
-  }
-}
-
-const utf16 = (text: string) => {
-  const out = new Bytes()
-  for (const c of text) out.u16(c.charCodeAt(0))
-  return out.done()
-}
 
 /** A plain sfnt with the given tables, 4-byte aligned. */
 function sfnt(tables: Record<string, Uint8Array>, version = 0x00010000): Uint8Array {
@@ -63,29 +28,6 @@ function sfnt(tables: Record<string, Uint8Array>, version = 0x00010000): Uint8Ar
     out.bytes(tables[tag])
     while (out.length % 4) out.u8(0)
   }
-  return out.done()
-}
-
-/** A collection of `fonts` (their table offsets moved); `offsets` may rewrite its directory of `count` faces. */
-function collection(fonts: Uint8Array[], offsets?: (starts: number[]) => number[], count = fonts.length): Uint8Array {
-  const starts: number[] = []
-  let at = 12 + count * 4
-  for (const font of fonts) {
-    starts.push(at)
-    at += font.length
-  }
-  const directory = offsets ? offsets(starts) : starts
-  assert.equal(directory.length, count)
-  const out = new Bytes().tag('ttcf').u32(0x00010000, count)
-  for (const offset of directory) out.u32(offset)
-  fonts.forEach((font, i) => {
-    const copy = font.slice()
-    const view = new DataView(copy.buffer)
-    for (let t = 0; t < view.getUint16(4); t++) {
-      view.setUint32(12 + t * 16 + 8, view.getUint32(12 + t * 16 + 8) + starts[i])
-    }
-    out.bytes(copy)
-  })
   return out.done()
 }
 
@@ -169,13 +111,15 @@ function woff2(origLength: number, stream: Uint8Array): Uint8Array {
   return header.bytes(stream).done()
 }
 
-test('WOFF2: a Brotli stream larger than the directory stops the decoder', () => {
+test('WOFF2: a Brotli stream larger than the directory stops the decoder', async () => {
+  await loadBrotliDictionary()
   const start = Date.now()
   assert.throws(() => openFont(woff2(16, BROTLI_64K_ZEROS)), isDamaged(/does not decompress.*more than 16 bytes/))
   assert.ok(Date.now() - start < 1000)
 })
 
-test('WOFF2: tables adding up to more than the limit are refused before decoding', () => {
+test('WOFF2: tables adding up to more than the limit are refused before decoding', async () => {
+  await loadBrotliDictionary()
   assert.throws(() => openFont(woff2(65536, BROTLI_64K_ZEROS), { maxUnpackedBytes: 4096 }), isDamaged(/more than 4096/))
   // Within the limit the same stream decodes.
   const font = openFont(woff2(65536, BROTLI_64K_ZEROS), { maxUnpackedBytes: 65536 })

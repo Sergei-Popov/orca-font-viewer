@@ -1,5 +1,5 @@
 // The custom editor: Orca opens a font file in a main editor tab here — from the file tree, a file
-// link in a chat, or `orca file open` — and sends its bytes. Orca keeps files over 64 MiB out of
+// link in a chat, or `orca file open` — and sends its bytes. Orca keeps files over 50 MiB out of
 // custom editors and shows its own notice instead. The viewer never edits, so Orca never saves the
 // tab; an outside write reloads the font and keeps the tab, sizes, text and selection.
 

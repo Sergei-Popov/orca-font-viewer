@@ -20,6 +20,32 @@ All notable changes to this plugin are documented here. The format follows
   Info tab), built by `scripts/listing-image.sh` from `tools/listing.json` with OFL demo fonts
   that `tools/listing-samples.sh` downloads at pinned sha256s and never commits. The manifest
   lists each image with its alt text only, and the description is shorter (298 characters).
+- Characters search: words are a block search only when they match a block the font has (by its
+  English name or its name in the UI language); otherwise the box searches for the characters
+  typed, however many, so "greek" in a font without Greek finds g, r, e and k.
+
+### Fixed
+
+- Hostile fonts can no longer stall the tab or exhaust memory:
+  - The character map reader pays every step (code points, segments, groups, glyph reads past the
+    table) from one budget per character map, shared by all its subtables, and tries at most 16
+    subtables.
+  - A collection's face picker labels share one budget and fall back to `#n`; faces that point at
+    one `name` table with different lengths parse it once; WOFF 2.0 collections, like sfnt ones,
+    may list at most 10,000 faces.
+  - Names used as labels (instances, axes, features, the header) are cut at 256 characters, at most
+    1,000 named instances are read, and one `name` table decodes at most 4 MiB of text.
+  - A collection face whose tables overlap or add up to more than the file is not cut out; the
+    "could not load this font" notice says why. When Chromium refuses a font, the viewer no longer
+    retries the same bytes as a `data:` URL.
+- The block filter's "No block" option showed every character; all the gaps between blocks now
+  share one option that shows only them.
+- Monospaced fonts whose `post` table does not say so (Noto Sans Mono) get the Monospaced badge,
+  by OS/2 PANOSE or by equal widths of their printable ASCII characters.
+- Russian UI: weight and width classes have Russian names, the symbol font note and the reason a
+  face cannot be shown are translated, and the line height uses a decimal comma.
+- README and code comments gave Orca's limit for plugin editors as 64 MiB; it is 50 MiB. The README
+  has a Known limits section, and `vendor/README.md` links each library's upstream.
 
 ## [0.1.0] - 2026-11-14
 

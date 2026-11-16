@@ -18,11 +18,29 @@ import { featureName, featureSettings, isOnByDefault, isUserFeature, variationSe
 import { openFont } from './font/container'
 import { describeFace } from './font/info'
 import { otfFixture, ttfFixture } from './font/test-fonts'
-import { groupByBlock, layoutGrid, moveInGrid, rowOf, visibleRange } from './grid'
+import { NO_BLOCK, blockOptions, groupByBlock, inBlockFilter, layoutGrid, moveInGrid, rowOf, visibleRange } from './grid'
 import { fill, stringsFor } from './i18n'
 
 const en = stringsFor('en-US')
 const ru = stringsFor('ru')
+
+test('the block filter has one option for all the gaps between blocks, apart from every block', () => {
+  // Two gaps (U+2FE0 and U+10200) around Basic Latin, CJK Symbols and Lycian.
+  const codes = Uint32Array.from([0x41, 0x42, 0x2fe0, 0x2fe1, 0x3001, 0x10200, 0x10280])
+  const groups = groupByBlock(codes)
+  assert.deepEqual(groups.map((group) => group.block), ['Basic Latin', '', 'CJK Symbols and Punctuation', '', 'Lycian'])
+  assert.deepEqual(blockOptions(groups), [
+    { value: 'Basic Latin', block: 'Basic Latin', count: 2 },
+    { value: 'CJK Symbols and Punctuation', block: 'CJK Symbols and Punctuation', count: 1 },
+    { value: 'Lycian', block: 'Lycian', count: 1 },
+    { value: NO_BLOCK, block: '', count: 3 }
+  ])
+  const shown = (value: string) => groupByBlock(codes, (_, block) => inBlockFilter(value, block)).flatMap((group) => group.codes)
+  assert.deepEqual(shown(NO_BLOCK), [0x2fe0, 0x2fe1, 0x10200])
+  assert.deepEqual(shown('Lycian'), [0x10280])
+  assert.equal(shown('').length, codes.length)
+  assert.deepEqual(blockOptions(groupByBlock(Uint32Array.from([0x41]))), [{ value: 'Basic Latin', block: 'Basic Latin', count: 1 }])
+})
 
 test('names Unicode blocks, including gaps', () => {
   assert.equal(blockOf(0x41), 'Basic Latin')

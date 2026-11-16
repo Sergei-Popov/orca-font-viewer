@@ -4,7 +4,7 @@
   "execution": "sandboxed-ui",
   "id": "font-viewer",
   "name": "Font Viewer",
-  "version": "0.1.0",
+  "version": "0.1.1",
   "description": "Fonts in Orca's editor tabs: .ttf, .otf, .woff, .woff2, .ttc and .otc. Type your own sample at any size, move variable axes, switch OpenType features, browse every character by Unicode block with code points to copy, and read names, metrics, licence and tables. Works offline; never edits the file.",
   "author": {
     "name": "Sergei Popov",

@@ -3,7 +3,7 @@
 // characters, Last Resort over a million).
 
 import { BLOCK_STARTS } from './font/blocks-data'
-import { blockOf } from './font/chars'
+import { type CharQuery, blockOf, matchesQuery } from './font/chars'
 
 export type BlockGroup = { block: string; codes: number[] }
 
@@ -27,6 +27,19 @@ export function groupByBlock(codes: Uint32Array, keep: (code: number, block: str
     current.codes.push(code)
   }
   return groups
+}
+
+/**
+ * The groups the Characters grid shows for `query` within the block filter `filter`: the matching
+ * code points by block, and for a block search that also has typed characters ("сим"), those of
+ * them the blocks do not show come first.
+ */
+export function queryGroups(codes: Uint32Array, query: CharQuery, filter: string, labelOf: (block: string) => string): BlockGroup[] {
+  const matches = (code: number, block: string) => matchesQuery(query, code, block, labelOf(block))
+  const groups = groupByBlock(codes, (code, block) => inBlockFilter(filter, block) && matches(code, block))
+  if (query.kind !== 'block' || !query.typed) return groups
+  const typed = query.typed
+  return [...groupByBlock(codes, (code, block) => typed.has(code) && inBlockFilter(filter, block) && !matches(code, block)), ...groups]
 }
 
 /** The block filter's value for code points outside every block ('' is every block). */

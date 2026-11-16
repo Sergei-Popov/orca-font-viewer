@@ -12,7 +12,6 @@ import {
   htmlEntity,
   isInvisible,
   jsEscape,
-  matchesQuery,
   parseCharQuery,
   uPlus,
   utf8Bytes
@@ -25,9 +24,9 @@ import {
   type GridPosition,
   blockOptions,
   groupByBlock,
-  inBlockFilter,
   layoutGrid,
   moveInGrid,
+  queryGroups,
   rowOf,
   visibleRange
 } from '../grid'
@@ -148,6 +147,7 @@ export class CharactersTab {
     const s = this.host.strings
     this.search.value = this.state.query
     const options = blockOptions(groupByBlock(info.cmap.codes))
+    const locale = this.host.language === 'ru' ? 'ru-RU' : 'en-US'
     this.blockNames = fontBlockNames(
       options.map((option) => option.block),
       this.host.language
@@ -155,7 +155,7 @@ export class CharactersTab {
     this.blockSelect.replaceChildren(h('option', { value: '' }, s.allBlocks))
     for (const option of options) {
       this.blockSelect.append(
-        h('option', { value: option.value }, `${blockLabel(option.block, this.host.language, s.noBlock)} (${option.count})`)
+        h('option', { value: option.value }, `${blockLabel(option.block, this.host.language, s.noBlock)} (${option.count.toLocaleString(locale)})`)
       )
     }
     if (!options.some((option) => option.value === this.state.block)) this.state.block = ''
@@ -177,7 +177,7 @@ export class CharactersTab {
     if (!info) return
     this.dirty = false
     const s = this.host.strings
-    const query = parseCharQuery(this.state.query, this.blockNames)
+    const query = parseCharQuery(this.state.query, this.blockNames, info.cmap.codes)
     const block = this.state.block
     const language = this.host.language
     const labels = new Map<string, string>()
@@ -189,7 +189,7 @@ export class CharactersTab {
       }
       return label
     }
-    this.groups = groupByBlock(info.cmap.codes, (code, name) => inBlockFilter(block, name) && matchesQuery(query, code, name, labelOf(name)))
+    this.groups = queryGroups(info.cmap.codes, query, block, labelOf)
     const total = info.cmap.codes.length
     this.relayout()
     this.count.textContent = fill(s.charsCount, {

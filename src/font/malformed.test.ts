@@ -1,4 +1,4 @@
-// Damaged and malformed fonts, built here byte by byte and kept small: limits that protect a 64 MiB
+// Damaged and malformed fonts, built here byte by byte and kept small: limits that protect a 50 MiB
 // file are passed in scaled down, so each case runs in milliseconds.
 
 import { assert, test } from 'orca/testing'
@@ -493,11 +493,22 @@ test('a collection face whose tables overlap is not cut out', () => {
 // ------------------------------------------------------------------------------------------------
 // Monospaced: post, OS/2 PANOSE, or the advances of printable ASCII
 
+type MetricsOptions = {
+  advance: (glyph: number) => number
+  panose?: number[]
+  fixedPitch?: boolean
+  glyphs?: number
+  /** cmap groups [first, last, glyph]; U+0021–007E to glyphs 1–94 by default. */
+  groups?: [number, number, number][]
+  /** 12: each code its own glyph from the group's first; 13: the whole group on one glyph. */
+  format?: 12 | 13
+}
+
 /**
- * A font mapping U+0021–007E to glyphs 1–94, with `glyphs` glyphs whose advances `advance` gives,
- * post's isFixedPitch and OS/2's PANOSE bytes.
+ * A font with `glyphs` glyphs whose advances `advance` gives, the characters `groups` maps, post's
+ * isFixedPitch and OS/2's PANOSE bytes.
  */
-function metricsFont({ advance, panose = [], fixedPitch = false, glyphs = 95 }: { advance: (glyph: number) => number; panose?: number[]; fixedPitch?: boolean; glyphs?: number }): Uint8Array {
+function metricsFont({ advance, panose = [], fixedPitch = false, glyphs = 95, groups = [[0x21, 0x7e, 1]], format = 12 }: MetricsOptions): Uint8Array {
   const os2 = new Bytes()
     .u16(0, 600, 400, 5, 0) // version, xAvgCharWidth, weight, width, fsType
     .u16(...Array(11).fill(0)) // sub- and superscripts, strikeout, family class
@@ -511,7 +522,7 @@ function metricsFont({ advance, panose = [], fixedPitch = false, glyphs = 95 }: 
   for (let glyph = 0; glyph < glyphs; glyph++) hmtx.u16(advance(glyph), 0)
   return sfnt({
     'OS/2': os2,
-    cmap: cmap([{ platform: 3, encoding: 10, data: format12([[0x21, 0x7e, 1]]) }]),
+    cmap: cmap([{ platform: 3, encoding: 10, data: format12(groups, format) }]),
     head: HEAD,
     hhea,
     hmtx: hmtx.done(),
@@ -547,6 +558,34 @@ test('monospaced: by the advances of printable ASCII when post and PANOSE say no
   assert.deepEqual(advanceWidths(new Bytes().u16(500, 0).done(), 3, [0, 2]), [500, null])
   // The test fixture has four ASCII letters at 600: too few to tell.
   assert.equal(monospace(ttfFixture), false)
+})
+
+test('monospaced: the ASCII rule needs 90 ASCII characters on glyphs of their own', () => {
+  // 90 of the 94 are enough, 89 are not.
+  assert.equal(monospace(metricsFont({ advance: () => 600, groups: [[0x21, 0x7a, 1]] })), true)
+  assert.equal(monospace(metricsFont({ advance: () => 600, groups: [[0x21, 0x79, 1]] })), false)
+  // An emoji font (Apple Color Emoji, Noto Color Emoji) maps only the keycap bases "#*0-9", all
+  // one width.
+  const keycaps: [number, number, number][] = [[0x23, 0x23, 1], [0x2a, 0x2a, 2], [0x30, 0x39, 3], [0x1f600, 0x1f64f, 13]]
+  assert.equal(monospace(metricsFont({ advance: () => 800, groups: keycaps, glyphs: 93 })), false)
+  // A fallback font (LastResort) draws all of ASCII with one glyph.
+  assert.equal(monospace(metricsFont({ advance: () => 2253, groups: [[0x21, 0x7e, 1]], format: 13, glyphs: 3 })), false)
+  // Two ASCII characters on one glyph are enough to tell it is not a text font.
+  const shared: [number, number, number][] = [[0x21, 0x7d, 1], [0x7e, 0x7e, 1]]
+  assert.equal(monospace(metricsFont({ advance: () => 600, groups: shared })), false)
+})
+
+test('monospaced: the ASCII width must be the width of 80% of the glyphs the font maps', () => {
+  // A dual-width CJK font (SimSong, PCMyungjo): half-width ASCII all 500, then 2,000 mapped
+  // ideographs at 1000.
+  const ideographs: [number, number, number][] = [[0x21, 0x7e, 1], [0x4e00, 0x4e00 + 1999, 95]]
+  assert.equal(monospace(metricsFont({ advance: (glyph) => (glyph < 95 ? 500 : 1000), groups: ideographs, glyphs: 2095 })), false)
+  // Noto Sans Mono by its advances alone: ASCII and most other glyphs at 600, a few wide ones.
+  const noto: [number, number, number][] = [[0x21, 0x7e, 1], [0x400, 0x400 + 299, 95]]
+  const notoAdvance = (glyph: number) => (glyph < 95 || glyph % 6 !== 0 ? 600 : 1200)
+  assert.equal(monospace(metricsFont({ advance: notoAdvance, groups: noto, glyphs: 395 })), true)
+  // Unmapped glyphs do not count: a font with wide glyphs only for its ligatures stays monospaced.
+  assert.equal(monospace(metricsFont({ advance: (glyph) => (glyph < 95 ? 600 : 1800), glyphs: 2095 })), true)
 })
 
 // ------------------------------------------------------------------------------------------------

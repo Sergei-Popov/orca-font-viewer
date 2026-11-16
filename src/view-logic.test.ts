@@ -19,7 +19,7 @@ import { featureName, featureSettings, isOnByDefault, isUserFeature, variationSe
 import { openFont } from './font/container'
 import { describeFace } from './font/info'
 import { otfFixture, ttfFixture } from './font/test-fonts'
-import { NO_BLOCK, blockOptions, groupByBlock, inBlockFilter, layoutGrid, moveInGrid, rowOf, visibleRange } from './grid'
+import { NO_BLOCK, blockOptions, groupByBlock, inBlockFilter, layoutGrid, moveInGrid, queryGroups, rowOf, visibleRange } from './grid'
 import { fill, stringsFor } from './i18n'
 
 const en = stringsFor('en-US')
@@ -105,6 +105,42 @@ test('words that name no block of the font are searched as the characters typed'
   assert.ok(sentence.kind === 'codes' && sentence.codes.has(0x44a) && sentence.codes.has(0x451) && !sentence.codes.has(0x20))
   const word = parseCharQuery('Typography', EN_NAMES)
   assert.ok(word.kind === 'codes' && word.codes.size === 8)
+})
+
+test('block names match where a word starts; a short word that only starts one also shows its characters', () => {
+  // "ate", "the" and "ion" lie inside words of block names (Private, Mathematical, Extensions).
+  const english = fontBlockNames(['Basic Latin', 'Private Use Area', 'Mathematical Operators', 'IPA Extensions', 'General Punctuation'], 'en')
+  for (const word of ['ate', 'the', 'ion']) assert.equal(parseCharQuery(word, english).kind, 'codes', word)
+  assert.equal(parseCharQuery('ext', english).kind, 'block')
+  // An Arial-like font with a CJK ideograph, in the Russian UI.
+  const blocks = ['Basic Latin', 'Cyrillic', 'Currency Symbols', 'Letterlike Symbols', 'Mathematical Operators', 'CJK Unified Ideographs']
+  const names = fontBlockNames(blocks, 'ru')
+  const codes = Uint32Array.from(
+    [...'CJKLabcilnrty', ...'АКаилмрст', '€', '№', '∑', '中'].map((c) => c.codePointAt(0)!).sort((a, b) => a - b)
+  )
+  const shown = (query: string, filter = '') =>
+    queryGroups(codes, parseCharQuery(query, names, codes), filter, (block) => blockLabel(block, 'ru', '-')).map(
+      (group) => `${group.block}: ${String.fromCodePoint(...group.codes)}`
+    )
+  // "сим" starts "символы", and с, и, м are in the font: they come first, then the symbol blocks.
+  assert.deepEqual(shown('сим'), ['Cyrillic: имс', 'Currency Symbols: €', 'Letterlike Symbols: №'])
+  assert.deepEqual(shown('лат'), ['Cyrillic: алт', 'Basic Latin: CJKLabcilnrty'])
+  assert.deepEqual(shown('мат'), ['Cyrillic: амт', 'Mathematical Operators: ∑'])
+  // The block filter applies to both parts.
+  assert.deepEqual(shown('сим', 'Currency Symbols'), ['Currency Symbols: €'])
+  // A letter the font lacks (в): the blocks only.
+  assert.deepEqual(shown('симв'), ['Currency Symbols: €', 'Letterlike Symbols: №'])
+  // Whole words of a block name, longer words and code points work as before.
+  assert.deepEqual(shown('Latin'), ['Basic Latin: CJKLabcilnrty'])
+  assert.deepEqual(shown('Cyrillic'), ['Cyrillic: АКаилмрст'])
+  assert.deepEqual(shown('basic latin'), ['Basic Latin: CJKLabcilnrty'])
+  assert.deepEqual(shown('CJK'), ['CJK Unified Ideographs: 中'])
+  assert.deepEqual(shown('Кириллица'), ['Cyrillic: АКаилмрст'])
+  // "Кирил" only starts "Кириллица", but its letters are in that block: they are not shown twice.
+  assert.deepEqual(shown('Кирил'), ['Cyrillic: АКаилмрст'])
+  assert.deepEqual(shown('U+0441'), ['Cyrillic: с'])
+  // "ate" starts no word of a block name: its letters, those the font has.
+  assert.deepEqual(shown('ate'), ['Basic Latin: at'])
 })
 
 test('reads block names, ranges and punctuation in the search box the way they are meant', () => {
@@ -219,6 +255,8 @@ test('picks a sample the font can draw', () => {
 test('offers user-facing feature switches with names', () => {
   assert.equal(featureName('smcp', null, 'en'), 'Small capitals')
   assert.equal(featureName('smcp', null, 'ru'), 'Капитель')
+  assert.equal(featureName('pcap', null, 'ru'), 'Мини-капитель')
+  assert.equal(featureName('c2pc', null, 'ru'), 'Прописные в мини-капитель')
   assert.equal(featureName('ss03', null, 'en'), 'Stylistic set 3')
   assert.equal(featureName('cv11', null, 'ru'), 'Вариант знака 11')
   assert.equal(featureName('ss01', 'Single-storey a', 'en'), 'Single-storey a')

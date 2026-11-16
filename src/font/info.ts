@@ -185,17 +185,25 @@ export function faceLabels(faces: readonly Face[], uiLanguage: string, cache: Ta
   })
 }
 
+/** Printable ASCII characters a font must map for its advances to tell monospacing (of 94). */
+const MONO_ASCII = 90
+/** The share of its mapped glyphs the ASCII width must cover: dual-width CJK fonts cover about 1%. */
+const MONO_COVERAGE = 0.8
+
 /**
  * Whether a font is monospaced: post says so; or OS/2 PANOSE says Latin Text (2) with Monospaced
- * proportion (9), as Noto Sans Mono does while its post says otherwise; or nearly all its printable
- * ASCII characters (U+0021–007E, at least ten) have one advance width. Only ASCII is measured: in
- * a CJK font nearly every glyph is one em wide, yet its Latin letters are proportional.
+ * proportion (9), as Noto Sans Mono does while its post says otherwise; or its advances say so.
+ * For the advances, at least 90 of the 94 printable ASCII characters (U+0021–007E) must be mapped,
+ * each to a glyph of its own (emoji fonts map only "#*0-9", fallback fonts map all of ASCII to one
+ * glyph), at least 95% of them must share one width, and that width must also be the width of at
+ * least 80% of all the glyphs the font maps: a dual-width CJK font has half-width Latin letters
+ * that are all alike, but nearly all its glyphs are full-width ideographs.
  */
 export function isMonospace(post: PostTable | null, os2: Os2Table | null, hhea: HheaTable | null, hmtx: Uint8Array | undefined, cmap: CharMap): boolean {
   if (post?.isFixedPitch) return true
   if (os2?.panose[0] === 2 && os2.panose[3] === 9) return true
   if (!hhea || !hmtx) return false
-  const glyphs: number[] = []
+  const ascii: number[] = []
   let lo = 0
   let hi = cmap.codes.length
   while (lo < hi) {
@@ -204,17 +212,43 @@ export function isMonospace(post: PostTable | null, os2: Os2Table | null, hhea: 
     else hi = mid
   }
   for (let i = lo; i < cmap.codes.length && cmap.codes[i] <= 0x7e; i++) {
-    if (cmap.glyphs[i] !== 0) glyphs.push(cmap.glyphs[i])
+    if (cmap.glyphs[i] !== 0) ascii.push(cmap.glyphs[i])
   }
+  if (ascii.length < MONO_ASCII || new Set(ascii).size !== ascii.length) return false
+  const width = dominantWidth(advanceWidths(hmtx, hhea.numberOfHMetrics, ascii))
+  if (!width || width.measured < MONO_ASCII || width.count < width.measured * 0.95) return false
+  // Every glyph the font maps, once each.
+  const seen = new Uint8Array(65536)
+  const mapped: number[] = []
+  for (const glyph of cmap.glyphs) {
+    if (glyph === 0 || glyph > 0xffff || seen[glyph]) continue
+    seen[glyph] = 1
+    mapped.push(glyph)
+  }
+  let measured = 0
+  let same = 0
+  for (const advance of advanceWidths(hmtx, hhea.numberOfHMetrics, mapped)) {
+    if (!advance) continue
+    measured++
+    if (advance === width.advance) same++
+  }
+  return same >= measured * MONO_COVERAGE
+}
+
+/** The most common non-zero advance, how many have it, and how many are non-zero. */
+function dominantWidth(advances: (number | null)[]): { advance: number; count: number; measured: number } | null {
   const counts = new Map<number, number>()
   let measured = 0
-  for (const advance of advanceWidths(hmtx, hhea.numberOfHMetrics, glyphs)) {
+  for (const advance of advances) {
     if (!advance) continue
     measured++
     counts.set(advance, (counts.get(advance) ?? 0) + 1)
   }
-  if (measured < 10) return false
-  return Math.max(...counts.values()) >= measured * 0.95
+  let best: { advance: number; count: number; measured: number } | null = null
+  for (const [advance, count] of counts) {
+    if (!best || count > best.count) best = { advance, count, measured }
+  }
+  return best
 }
 
 export function describeFace(face: Face, uiLanguage: string, cache: TableCache = newTableCache()): FaceInfo {

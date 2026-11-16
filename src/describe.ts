@@ -4,27 +4,31 @@ import { coverage } from './font/chars'
 import type { FaceInfo } from './font/info'
 import type { Language, Strings } from './i18n'
 
-const WEIGHTS: [number, string][] = [
-  [100, 'Thin'], [200, 'ExtraLight'], [300, 'Light'], [400, 'Regular'], [500, 'Medium'],
-  [600, 'SemiBold'], [700, 'Bold'], [800, 'ExtraBold'], [900, 'Black'], [950, 'ExtraBlack']
+const WEIGHTS: [weight: number, en: string, ru: string][] = [
+  [100, 'Thin', 'Тонкий'], [200, 'ExtraLight', 'Сверхсветлый'], [300, 'Light', 'Светлый'],
+  [400, 'Regular', 'Обычный'], [500, 'Medium', 'Средний'], [600, 'SemiBold', 'Полужирный'],
+  [700, 'Bold', 'Жирный'], [800, 'ExtraBold', 'Сверхжирный'], [900, 'Black', 'Чёрный'],
+  [950, 'ExtraBlack', 'Сверхчёрный']
 ]
 
-/** "700 (Bold)"; the nearest named weight for values in between. */
-export function weightLabel(weight: number): string {
+/** "700 (Bold)", "700 (Жирный)"; the nearest named weight for values in between. */
+export function weightLabel(weight: number, language: Language): string {
   let best = WEIGHTS[0]
   for (const entry of WEIGHTS) {
     if (Math.abs(entry[0] - weight) < Math.abs(best[0] - weight)) best = entry
   }
-  return best[0] === weight ? `${weight} (${best[1]})` : `${weight} (≈ ${best[1]})`
+  const name = language === 'ru' ? best[2] : best[1]
+  return best[0] === weight ? `${weight} (${name})` : `${weight} (≈ ${name})`
 }
 
-const WIDTHS = [
-  'UltraCondensed', 'ExtraCondensed', 'Condensed', 'SemiCondensed', 'Normal', 'SemiExpanded',
-  'Expanded', 'ExtraExpanded', 'UltraExpanded'
-]
+const WIDTHS: Record<Language, string[]> = {
+  en: ['UltraCondensed', 'ExtraCondensed', 'Condensed', 'SemiCondensed', 'Normal', 'SemiExpanded', 'Expanded', 'ExtraExpanded', 'UltraExpanded'],
+  ru: ['Ультрасжатый', 'Сверхсжатый', 'Сжатый', 'Полусжатый', 'Обычный', 'Полурасширенный', 'Расширенный', 'Сверхрасширенный', 'Ультрарасширенный']
+}
 
-export function widthLabel(width: number): string {
-  const name = WIDTHS[width - 1]
+/** "5 (Normal)", "5 (Обычный)"; the bare number for a width class outside 1–9. */
+export function widthLabel(width: number, language: Language): string {
+  const name = WIDTHS[language][width - 1]
   return name ? `${width} (${name})` : String(width)
 }
 
@@ -60,6 +64,11 @@ export function formatBytes(bytes: number, language: Language): string {
 
 export function formatNumber(value: number, language: Language): string {
   return value.toLocaleString(language === 'ru' ? 'ru-RU' : 'en-US', { maximumFractionDigits: 3 })
+}
+
+/** A value such as a line height with exactly `digits` decimals: "1.25", "1,25". */
+export function formatFixed(value: number, digits: number, language: Language): string {
+  return value.toLocaleString(language === 'ru' ? 'ru-RU' : 'en-US', { minimumFractionDigits: digits, maximumFractionDigits: digits })
 }
 
 /** A UTC date from the head table; fonts store no time zone. */

@@ -39,8 +39,29 @@ that the viewer can still read, the Info and Characters tabs keep working and a 
 It is read-only and offline: no capabilities, no network, the file is never modified. The UI
 follows Orca's language (English or Russian) and its light and dark themes.
 
-**Size limit.** Orca sends at most 64 MiB to a plugin editor and shows its own notice for larger
-files.
+## Known limits
+
+- **Size.** Orca sends at most 50 MiB to a plugin editor and shows its own notice for larger files.
+- **English messages in the Russian UI.** The Info tab's list of problems found while reading
+  (such as `cmap 3/1 format 4: …` or `fvar: 12 named instances were not read`) and the detail of a
+  "damaged file" message (such as `table directory lists 65535 tables`) stay in English: there are
+  about 30 of them, naming tables and byte counts. Why a face cannot be shown at all (its `head`,
+  `name` or `cmap` is missing or cut off) is translated.
+- **Block names.** In the Russian UI, 41 common Unicode blocks (Latin, Cyrillic, Greek, Arabic,
+  punctuation, arrows, box drawing, CJK ideographs, kana, …) have Russian names; the other blocks
+  keep their English Unicode names in the grid, the block filter and the search, which accepts
+  English names in either language.
+- **WOFF 2.0 collections** whose outlines are stored transformed draw only their first face; the
+  other faces show their characters and details in a fallback font.
+- **Monospaced** is shown when `post` says so, when OS/2 PANOSE says Latin Text with Monospaced
+  proportion, or when at least 90 printable ASCII characters, each on a glyph of its own, nearly
+  all have one width that is also the width of at least 80% of the glyphs the font maps. A
+  monospaced font without Latin letters is not recognised, and dual-width CJK fonts (half-width
+  Latin, full-width ideographs) are not called monospaced.
+- **Bounds for damaged or hostile files.** Names used as labels are cut at 256 characters (the Info
+  tab shows them whole), at most 1,000 named instances are read, one `name` table decodes at most
+  4 MiB of text, a character map stops after twice as many steps as Unicode has code points, and
+  past a total budget a collection's faces are listed as `#n`.
 
 ## Install
 
@@ -72,13 +93,17 @@ orca plugin shot local.font-viewer --editor "$PWD/path/to/font.ttf"   # PNG of t
 - `src/font/` — the font parser, DOM-free: `container.ts` (sfnt, collections, WOFF, WOFF2, cutting a
   face out of a collection), `tables.ts` (name, head, hhea, maxp, post, OS/2, cmap, fvar,
   GSUB/GPOS feature lists), `info.ts`, `features.ts`, `chars.ts`, `blocks-data.ts` (Unicode 16.0
-  blocks). Tested in `src/font/font.test.ts` against fonts built by `tools/make-fixtures.py`.
+  blocks), `brotli-dictionary.ts` (loads the Brotli dictionary on the first WOFF 2.0 file). Tested
+  in `src/font/*.test.ts` against fonts that `src/font/test-fonts.ts` writes table by table.
 - `src/describe.ts`, `src/grid.ts`, `src/render.ts` — pure helpers for the view, tested in
   `src/view-logic.test.ts` and `src/render.test.ts`.
-- `tools/` — generators for the test fonts, the block table and the icons (`make-icons.py` draws
-  "Aa" from STIXGeneral, OFL; `rasterize-icons.sh` makes the PNGs).
+- `tools/` — generators for the block table, the Brotli dictionary word list and the icons
+  (`make-icons.py` draws "Aa" from STIXGeneral, OFL; `rasterize-icons.sh` makes the PNGs), and
+  the listing images: `listing.json` is the spec for the hub's `scripts/listing-image.sh`, and
+  `listing-samples.sh` downloads the OFL demo fonts (Recursive, LXGW WenKai, Inter) at pinned
+  sha256s into git-ignored folders.
 - `vendor/` — [fflate](https://github.com/101arrowz/fflate) 0.8.3 (MIT) for WOFF 1.0 and
-  [brotli.js](https://github.com/devongovett/brotli.js) 2.1.0 (MIT, Google's decoder Apache-2.0)
+  [brotli.js](https://github.com/foliojs/brotli.js) 2.1.0 (MIT, Google's decoder Apache-2.0)
   for WOFF 2.0; see `vendor/README.md`.
 
 Branches follow git-flow: `feature/*` from `develop`, releases through `release/x.y.z` into

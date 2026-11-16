@@ -3,11 +3,12 @@
 
 import { defaultSample } from '../describe'
 import { FontError } from '../font/bytes'
-import { type FontContainer, openFont } from '../font/container'
-import { type FaceInfo, type TableCache, describeFace, faceLabel, newTableCache } from '../font/info'
+import { loadBrotliDictionary } from '../font/brotli-dictionary'
+import { type FontContainer, needsBrotliDictionary, openFont } from '../font/container'
+import { type FaceInfo, type TableCache, describeFace, faceLabels, newTableCache } from '../font/info'
 import { type Language, type Strings, fill } from '../i18n'
 import { icon } from '../icons'
-import { axesFor, faceStyle, fontMime, renderSource } from '../render'
+import { axesFor, faceStyle, renderSource } from '../render'
 import { CharactersTab } from './characters'
 import { h, html } from './dom'
 import { InfoTab } from './info'
@@ -55,6 +56,8 @@ export class App {
   private staleFaces: FontFace[] = []
   private family: string | null = null
   private loadToken = 0
+  /** Rises with each document Orca sends; a WOFF 2.0 file waiting for the dictionary checks it. */
+  private documentVersion = 0
 
   constructor(
     private readonly strings: Strings,
@@ -118,35 +121,44 @@ export class App {
 
   /** Reads a font file (a new one, or the same file written again) and shows it. */
   load(bytes: Uint8Array): void {
+    const version = ++this.documentVersion
+    if (!needsBrotliDictionary(bytes)) {
+      this.open(bytes)
+      return
+    }
+    // The first WOFF 2.0 file loads the Brotli dictionary; a document that arrives meanwhile wins.
+    loadBrotliDictionary().then(
+      () => {
+        if (version === this.documentVersion) this.open(bytes)
+      },
+      (error: unknown) => {
+        if (version === this.documentVersion) this.fail(error)
+      }
+    )
+  }
+
+  private open(bytes: Uint8Array): void {
     const s = this.strings
     let container: FontContainer
     try {
       container = openFont(bytes)
     } catch (error) {
-      this.loaded = null
-      this.dropFontFaces()
-      this.dropStaleFaces()
-      this.header.replaceChildren()
-      this.showMessage(s.errorTitle, errorText(error, s), 'error')
+      this.fail(error)
       return
     }
     const cache = newTableCache()
+    // Labels for the face picker, under one budget for all faces ("#n" once it is spent).
     const labels = container.collection
-      ? container.faces.map((face, i) => {
-          const label = faceLabel(face, i, this.language, cache)
-          return face.error ? fill(s.faceDamaged, { label }) : label
-        })
+      ? faceLabels(container.faces, this.language, cache).map((label, i) =>
+          container.faces[i].error ? fill(s.faceDamaged, { label }) : label
+        )
       : []
     const loaded: Loaded = { bytes, container, labels, infos: new Map(), cache, drawn: new Map() }
     if (!container.collection) {
       // A single font without head, name or cmap (for example cut short) cannot be shown at all.
       const info = this.infoOf(loaded, 0)
       if (info.damaged) {
-        this.loaded = null
-        this.dropFontFaces()
-        this.dropStaleFaces()
-        this.header.replaceChildren()
-        this.showMessage(s.errorTitle, fill(s.errorDamaged, { detail: info.damaged }), 'error')
+        this.fail(new FontError('damaged', info.damaged))
         return
       }
     }
@@ -161,6 +173,15 @@ export class App {
     }
     this.message.className = 'fv-message fv-hidden'
     this.showFace()
+  }
+
+  /** Shows why the file cannot be read, in place of the last font. */
+  private fail(error: unknown): void {
+    this.loaded = null
+    this.dropFontFaces()
+    this.dropStaleFaces()
+    this.header.replaceChildren()
+    this.showMessage(this.strings.errorTitle, errorText(error, this.strings), 'error')
   }
 
   /** Describes face `index` the first time it is shown. */
@@ -298,24 +319,18 @@ export class App {
     this.applyStyle()
   }
 
-  /** ArrayBuffer first; a data: URL (allowed by the frame's font-src) if Chromium refuses it. */
+  /**
+   * Hands the bytes to Chromium as an ArrayBuffer. When it refuses them there is no second try:
+   * a data: URL of the same bytes would only repeat the refusal, after encoding them all again.
+   */
   private async loadFontFace(bytes: Uint8Array, loaded: Loaded): Promise<{ family: string } | { error: string }> {
     const family = `fv-face-${++serial}`
-    const buffer = bytes.slice().buffer
-    let firstError: unknown
     try {
-      const face = new FontFace(family, buffer)
+      const face = new FontFace(family, bytes.slice().buffer)
       await face.load()
       return this.adopt(face, family, loaded)
     } catch (error) {
-      firstError = error
-    }
-    try {
-      const face = new FontFace(family, `url(data:${fontMime(bytes)};base64,${base64(bytes)})`)
-      await face.load()
-      return this.adopt(face, family, loaded)
-    } catch {
-      return { error: describeError(firstError) }
+      return { error: describeError(error) }
     }
   }
 
@@ -362,10 +377,3 @@ function describeError(error: unknown): string {
   return String(error)
 }
 
-function base64(bytes: Uint8Array): string {
-  let text = ''
-  for (let i = 0; i < bytes.length; i += 0x8000) {
-    text += String.fromCharCode(...bytes.subarray(i, i + 0x8000))
-  }
-  return btoa(text)
-}

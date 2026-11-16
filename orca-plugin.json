@@ -4,8 +4,8 @@
   "execution": "sandboxed-ui",
   "id": "font-viewer",
   "name": "Font Viewer",
-  "version": "0.1.0",
-  "description": "Fonts in Orca's editor tabs: opens .ttf, .otf, .woff, .woff2, .ttc and .otc files with sample text at any size, a waterfall of sizes, variable axes and named instances, OpenType feature switches, every character grouped by Unicode block with code points to copy, and the font's names, metrics, licence, embedding rights and tables. Works offline, never edits the file.",
+  "version": "0.1.1",
+  "description": "Fonts in Orca's editor tabs: .ttf, .otf, .woff, .woff2, .ttc and .otc. Type your own sample at any size, move variable axes, switch OpenType features, browse every character by Unicode block with code points to copy, and read names, metrics, licence and tables. Works offline; never edits the file.",
   "author": {
     "name": "Sergei Popov",
     "url": "https://github.com/Sergei-Popov"
@@ -15,26 +15,28 @@
   "icon": "images/icon.png",
   "cover": {
     "path": "images/cover.png",
-    "alt": "Inter in Font Viewer: sample text, a waterfall of sizes and the alphabets, with the optical size and weight axes and OpenType features on the right."
+    "alt": "Font Viewer on a variable font: your own text as a large sample at 72 px in a heavy, casual style, under the size controls."
   },
   "screenshots": [
     {
-      "path": "images/preview-light.png",
-      "alt": "Source Serif 4 at weight 602 with Orca's light theme: sample text, the size waterfall, the Weight and Optical Size sliders and OpenType features.",
-      "caption": "Move variable axes and switch OpenType features on your own text.",
-      "theme": "light"
+      "path": "images/shot-1-variable-axes.png",
+      "alt": "Variable axes at work: weight 800, Casual 1 and slant -15 on the sample text; the named instance reads Custom."
     },
     {
-      "path": "images/characters-dark.png",
-      "alt": "Inter's Characters tab with Orca's dark theme: a grid of characters with code points, the ampersand selected with its HTML, CSS and JavaScript forms.",
-      "caption": "Every character the font maps, with code points to copy.",
-      "theme": "dark"
+      "path": "images/shot-2-opentype-features.png",
+      "alt": "Code ligatures switched on in a monospaced font: the dlig feature checked and != => >= drawn as single glyphs."
     },
     {
-      "path": "images/info-light.png",
-      "alt": "The Info tab for Lora with Orca's light theme: names, designer and vendor links, style and metrics, the weight axis and the licence.",
-      "caption": "Names, metrics, axes and the font's licence.",
-      "theme": "light"
+      "path": "images/shot-3-characters.png",
+      "alt": "A CJK font with 47,336 glyphs by Unicode block: 20,992 CJK Unified Ideographs, one selected with its code point to copy."
+    },
+    {
+      "path": "images/shot-4-collection.png",
+      "alt": "A .ttc font collection with face 33 of 36 picked in Face: its name, style and 2,937 glyphs, previewed on the sample."
+    },
+    {
+      "path": "images/shot-5-info.png",
+      "alt": "The Info tab: vertical metrics and variable axes, then the OFL licence and its embedding rights. Shown in Orca's light theme."
     }
   ],
   "engines": {

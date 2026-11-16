@@ -1,0 +1,613 @@
+// Damaged and malformed fonts, built here byte by byte and kept small: limits that protect a 50 MiB
+// file are passed in scaled down, so each case runs in milliseconds.
+
+import { assert, test } from 'orca/testing'
+import { loadBrotliDictionary } from './brotli-dictionary'
+import { FontError } from './bytes'
+import { MAX_FACES, faceToSfnt, openFont } from './container'
+import { describeFace, faceLabel, faceLabels, newTableCache } from './info'
+import { renderSource } from '../render'
+import { LABEL_MAX, MAX_INSTANCES, MAX_NAME_DECODE_BYTES, advanceWidths, parseCmap, parseFvar, parseName, trimNuls } from './tables'
+import { Bytes, buildFont, sfnt as buildSfnt, collection, ttfFixture, utf16 } from './test-fonts'
+
+const isDamaged = (pattern?: RegExp) => (error: unknown) =>
+  error instanceof FontError && error.code === 'damaged' && (!pattern || pattern.test(error.message))
+
+// ------------------------------------------------------------------------------------------------
+// Builders
+
+/** A plain sfnt with the given tables, 4-byte aligned. */
+function sfnt(tables: Record<string, Uint8Array>, version = 0x00010000): Uint8Array {
+  const tags = Object.keys(tables).sort()
+  const out = new Bytes().u32(version).u16(tags.length, 0, 0, 0)
+  let offset = 12 + tags.length * 16
+  for (const tag of tags) {
+    out.tag(tag).u32(0, offset, tables[tag].length)
+    offset += (tables[tag].length + 3) & ~3
+  }
+  for (const tag of tags) {
+    out.bytes(tables[tag])
+    while (out.length % 4) out.u8(0)
+  }
+  return out.done()
+}
+
+function nameTable(records: [platform: number, encoding: number, language: number, nameId: number, data: Uint8Array][]): Uint8Array {
+  const out = new Bytes().u16(0, records.length, 6 + records.length * 12)
+  const storage = new Bytes()
+  for (const [platform, encoding, language, nameId, data] of records) {
+    out.u16(platform, encoding, language, nameId, data.length, storage.length)
+    storage.bytes(data)
+  }
+  return out.bytes(storage.done()).done()
+}
+
+const BASIC_NAME = nameTable([
+  [3, 1, 0x409, 1, utf16('Crafted')],
+  [3, 1, 0x409, 2, utf16('Regular')]
+])
+
+/** A head table: version, revision, checkSumAdjustment, magic, flags, unitsPerEm 1000. */
+const HEAD = new Bytes().u32(0x00010000, 0x00010000, 0x12345678, 0x5f0f3cf5).u16(0, 1000).u32(0, 0, 0, 0).u16(0, 0, 0, 0, 0, 0, 0, 0, 0).done()
+
+type Subtable = { platform: number; encoding: number; data: Uint8Array }
+
+function cmap(subtables: Subtable[]): Uint8Array {
+  const out = new Bytes().u16(0, subtables.length)
+  let offset = 4 + subtables.length * 8
+  for (const sub of subtables) {
+    out.u16(sub.platform, sub.encoding).u32(offset)
+    offset += sub.data.length
+  }
+  for (const sub of subtables) out.bytes(sub.data)
+  return out.done()
+}
+
+function format12(groups: [start: number, end: number, glyph: number][], format = 12): Uint8Array {
+  const out = new Bytes().u16(format, 0).u32(16 + groups.length * 12, 0, groups.length)
+  for (const [start, end, glyph] of groups) out.u32(start, end, glyph)
+  return out.done()
+}
+
+/** Segments [start, end, idDelta, idRangeOffset = 0]; the closing 0xFFFF segment is added. */
+function format4(segments: [start: number, end: number, delta: number, rangeOffset?: number][]): Uint8Array {
+  const all = [...segments, [0xffff, 0xffff, 1] as [number, number, number, number?]]
+  const n = all.length
+  const out = new Bytes().u16(4, 16 + n * 8, 0, n * 2, 0, 0, 0)
+  out.u16(...all.map((s) => s[1])).u16(0).u16(...all.map((s) => s[0])).u16(...all.map((s) => s[2] & 0xffff))
+  out.u16(...all.map((s) => s[3] ?? 0))
+  return out.done()
+}
+
+function format6(first: number, glyphs: number[]): Uint8Array {
+  return new Bytes().u16(6, 10 + glyphs.length * 2, 0, first, glyphs.length).u16(...glyphs).done()
+}
+
+function fvar(axisCount: number, instanceCount: number, instanceSize: number, instancesWritten: number): Uint8Array {
+  const out = new Bytes().u16(1, 0, 16, 2, axisCount, 20, instanceCount, instanceSize)
+  for (let i = 0; i < axisCount; i++) out.tag(`a${String(i).padStart(3, '0')}`).u32(0, 0, 0x10000).u16(0, 256)
+  for (let i = 0; i < instancesWritten; i++) {
+    out.u16(256, 0)
+    for (let a = 0; a < axisCount; a++) out.u32(0x8000)
+  }
+  return out.done()
+}
+
+// ------------------------------------------------------------------------------------------------
+// 1 · WOFF2: Brotli output bounded by the directory, and the directory by a limit
+
+/** brotli.compress(b'\0' * 65536, quality=11): 13 bytes that unpack to 64 KiB. */
+const BROTLI_64K_ZEROS = Uint8Array.from([0x1b, 0xff, 0xff, 0xf8, 0x27, 0x00, 0xe2, 0xb1, 0x40, 0x20, 0xf7, 0x1e, 0x00])
+
+/** A WOFF2 file with one `name` table of `origLength` bytes and `stream` as its Brotli data. */
+function woff2(origLength: number, stream: Uint8Array): Uint8Array {
+  const header = new Bytes().tag('wOF2').u32(0x00010000, 0).u16(1, 0).u32(0, stream.length).u16(1, 0).u32(0, 0, 0, 0, 0)
+  header.u8(5) // flags: known tag 5 = name, transform version 0
+  let rest = origLength
+  const base128: number[] = []
+  do {
+    base128.unshift(rest & 0x7f)
+    rest = Math.floor(rest / 128)
+  } while (rest > 0)
+  header.u8(...base128.map((b, i) => (i < base128.length - 1 ? b | 0x80 : b)))
+  return header.bytes(stream).done()
+}
+
+test('WOFF2: a Brotli stream larger than the directory stops the decoder', async () => {
+  await loadBrotliDictionary()
+  const start = Date.now()
+  assert.throws(() => openFont(woff2(16, BROTLI_64K_ZEROS)), isDamaged(/does not decompress.*more than 16 bytes/))
+  assert.ok(Date.now() - start < 1000)
+})
+
+test('WOFF2: tables adding up to more than the limit are refused before decoding', async () => {
+  await loadBrotliDictionary()
+  assert.throws(() => openFont(woff2(65536, BROTLI_64K_ZEROS), { maxUnpackedBytes: 4096 }), isDamaged(/more than 4096/))
+  // Within the limit the same stream decodes.
+  const font = openFont(woff2(65536, BROTLI_64K_ZEROS), { maxUnpackedBytes: 65536 })
+  assert.equal(font.faces[0].tables.get('name')?.length, 65536)
+})
+
+// ------------------------------------------------------------------------------------------------
+// 5 · WOFF 1.0: origLength checked against totalSfntSize and the limit; inflation bounded
+
+/** zlib.compress(b'\0' * 65536, 9): 84 bytes that inflate to 64 KiB. */
+const ZLIB_64K_ZEROS = Uint8Array.from(
+  '78daedc101010000008090feafee080a0000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000006a000f0001'
+    .match(/../g)!
+    .map((pair) => parseInt(pair, 16))
+)
+
+function woff(tables: { tag: string; origLength: number; data: Uint8Array }[], totalSfntSize: number): Uint8Array {
+  const out = new Bytes().tag('wOFF').u32(0x00010000, 0).u16(tables.length, 0).u32(totalSfntSize).u16(1, 0).u32(0, 0, 0, 0, 0)
+  let offset = 44 + tables.length * 20
+  for (const table of tables) {
+    out.tag(table.tag).u32(offset, table.data.length, table.origLength, 0)
+    offset += (table.data.length + 3) & ~3
+  }
+  for (const table of tables) {
+    out.bytes(table.data)
+    while (out.length % 4) out.u8(0)
+  }
+  return out.done()
+}
+
+test('WOFF 1.0: table sizes must fit the header and the limit', () => {
+  const huge = woff(
+    [
+      { tag: 'glyf', origLength: 0x40000000, data: ZLIB_64K_ZEROS },
+      { tag: 'name', origLength: 0x40000000, data: ZLIB_64K_ZEROS }
+    ],
+    1024
+  )
+  assert.throws(() => openFont(huge), isDamaged(/add up to more than the 1024 bytes/))
+  const big = woff([{ tag: 'name', origLength: 65536, data: ZLIB_64K_ZEROS }], 65536 + 28)
+  assert.throws(() => openFont(big, { maxUnpackedBytes: 1000 }), isDamaged(/more than 1000/))
+  assert.equal(openFont(big).faces[0].tables.get('name')?.length, 65536)
+})
+
+test('WOFF 1.0: a table that inflates past its origLength is damaged, not looped through', () => {
+  const lying = woff([{ tag: 'name', origLength: 100, data: ZLIB_64K_ZEROS }], 200)
+  assert.throws(() => openFont(lying), isDamaged(/name does not inflate/))
+})
+
+// ------------------------------------------------------------------------------------------------
+// 2 · fvar record sizes and work
+
+test('fvar: instance records must have the size the spec gives', () => {
+  assert.throws(() => parseFvar(fvar(3, 65535, 0, 0)), isDamaged(/instance records of 0 bytes/))
+  assert.throws(() => parseFvar(fvar(3, 1, 4 + 3 * 4 + 4, 1)), isDamaged(/instance records/))
+  assert.throws(() => parseFvar(fvar(65, 0, 0, 0)), isDamaged(/65 axes/))
+  const ok = parseFvar(fvar(3, 2, 4 + 3 * 4, 2))
+  assert.equal(ok.instances.length, 2)
+  assert.equal(ok.instances[1].coordinates.a002, 0.5)
+})
+
+test('fvar: instances past the table or over the work limit are skipped, axes kept', () => {
+  const short = parseFvar(fvar(3, 65535, 16, 10))
+  assert.equal(short.axes.length, 3)
+  assert.equal(short.instances.length, 10)
+  assert.equal(short.skippedInstances, 65525)
+  const limited = parseFvar(fvar(4, 10, 20, 10), 12)
+  assert.equal(limited.instances.length, 3)
+  assert.equal(limited.skippedInstances, 7)
+  const info = describeFace(openFont(sfnt({ name: BASIC_NAME, head: HEAD, cmap: cmap([]), fvar: fvar(3, 65535, 16, 10) })).faces[0], 'en')
+  assert.equal(info.axes.length, 3)
+  assert.ok(info.problems.some((p) => /65525 named instances were not read/.test(p)))
+})
+
+// ------------------------------------------------------------------------------------------------
+// 3 · name: shared strings decoded once, NUL runs trimmed in linear time
+
+test('name: trailing NULs are trimmed, inner ones kept', () => {
+  assert.equal(trimNuls('Name\0\0\0'), 'Name')
+  assert.equal(trimNuls('\0\0\0A'), '\0\0\0A')
+  assert.equal(trimNuls('\0'.repeat(30000) + 'A').length, 30001)
+})
+
+test('name: thousands of records sharing one long string decode it once', () => {
+  const payload = utf16('A'.repeat(30000))
+  const records: [number, number, number, number, Uint8Array][] = []
+  for (let i = 0; i < 2000; i++) records.push([3, 1, 0x409, 1 + (i % 20), payload])
+  // Every record points at the same storage: write it once.
+  const table = new Bytes().u16(0, records.length, 6 + records.length * 12)
+  for (const [p, e, l, id] of records) table.u16(p, e, l, id, payload.length, 0)
+  const names = parseName(table.bytes(payload).done())
+  assert.equal(names.size, 2000)
+  assert.equal(names.pick(1, 'en')?.length, 30000)
+  assert.equal(names.pick(4, 'en')?.length, 30000)
+  assert.equal(names.decodedStrings, 1)
+})
+
+test('name: blank records are skipped for the next best', () => {
+  const names = parseName(
+    nameTable([
+      [3, 1, 0x409, 1, utf16('   ')],
+      [1, 0, 0, 1, Uint8Array.from([0x80, 0x41])]
+    ])
+  )
+  assert.equal(names.pick(1, 'en'), 'ÄA')
+})
+
+test('fvar: at most 1,000 named instances are read', () => {
+  const table = parseFvar(fvar(1, 1500, 8, 1500))
+  assert.equal(MAX_INSTANCES, 1000)
+  assert.equal(table.instances.length, 1000)
+  assert.equal(table.skippedInstances, 500)
+})
+
+test('name: names used as labels are cut at 256 characters; the Info tab keeps them whole', () => {
+  const family = 'Long Family '.repeat(40) // 480 characters
+  const info = describeFace(openFont(buildSfnt(buildFont({ family: family.trim() }))).faces[0], 'en')
+  assert.equal(info.family.length, LABEL_MAX)
+  assert.ok(info.family.endsWith('…'))
+  assert.ok(family.startsWith(info.family.slice(0, -1)))
+  assert.equal(info.names.family, family.trim())
+  // An emoji (a surrogate pair) at the cut is dropped whole, never split.
+  const emoji = parseName(nameTable([[3, 1, 0x409, 1, utf16(`${'a'.repeat(LABEL_MAX - 2)}😀😀😀`)]]))
+  const cut = emoji.label(1, 'en')!
+  assert.equal(cut, `${'a'.repeat(LABEL_MAX - 2)}…`)
+})
+
+test('name: one table decodes at most 4 MiB of strings', () => {
+  // 200 records, each a different 65,000-byte slice of the same storage: 13 MB if all decoded.
+  const count = 200
+  const storage = 6 + count * 12
+  const out = new Bytes().u16(0, count, storage)
+  for (let i = 0; i < count; i++) out.u16(3, 1, 0x409, 300 + i, 65000, i * 2)
+  for (let i = 0; i < 65000 / 2 + count; i++) out.u16(0x41)
+  const names = parseName(out.done())
+  let found = 0
+  for (let i = 0; i < count; i++) if (names.pick(300 + i, 'en')) found++
+  assert.ok(names.decodedBytes <= MAX_NAME_DECODE_BYTES)
+  assert.equal(found, Math.floor(MAX_NAME_DECODE_BYTES / 65000))
+})
+
+// ------------------------------------------------------------------------------------------------
+// 4, 9, 15 · cmap: overlaps bounded, damaged subtables skipped, Mac Roman everywhere
+
+test('cmap: overlapping groups are read once and bounded', () => {
+  const overlap = cmap([{ platform: 3, encoding: 10, data: format12(Array(16).fill([0, 0x10ffff, 1])) }])
+  const bounded = parseCmap(overlap, 5000)
+  assert.equal(bounded.codes.length, 4999) // the group itself is one step of the 5000
+  assert.ok(bounded.problems[0].includes('overlap'))
+  const full = parseCmap(overlap)
+  assert.equal(full.codes.length, 0x110000)
+  assert.equal(full.codes[0x41], 0x41)
+  const segments = cmap([{ platform: 3, encoding: 1, data: format4(Array(64).fill([0, 0xfffe, 1])) }])
+  const bmp = parseCmap(segments, 70000)
+  assert.equal(bmp.codes.length, 0xffff)
+  assert.ok(bmp.problems[0].includes('overlap'))
+})
+
+test('cmap: one budget for the whole call counts glyph reads that fall past the table', () => {
+  // idRangeOffset 0xFFFE sends every glyph read of 0..0xFFFE past the table: nothing is mapped,
+  // but each read is a step of the budget, so the call stops instead of looping in silence.
+  const pastTheTable = cmap([{ platform: 3, encoding: 1, data: format4([[0, 0xfffe, 0, 0xfffe]]) }])
+  const bounded = parseCmap(pastTheTable, 1000)
+  assert.equal(bounded.codes.length, 0)
+  assert.deepEqual(bounded.problems, ['cmap 3/1 format 4: reading stopped after 1000 steps (ranges that overlap or point past the table)'])
+  // A thousand such segments would be 65 million reads; the default budget stops them.
+  const many = parseCmap(cmap([{ platform: 3, encoding: 1, data: format4(Array(1000).fill([0, 0xfffe, 0, 0xfffe])) }]))
+  assert.equal(many.codes.length, 0)
+  assert.ok(many.problems[0].includes('reading stopped after'))
+})
+
+test('cmap: subtables that fail share one budget, and at most 16 are tried', () => {
+  // 40 format 6 subtables, each listing 65,535 glyphs: each reads on to the end of the table
+  // (about 1,100 glyph ids), then fails there, and the next one starts over.
+  const failing = Array.from({ length: 40 }, () => ({ platform: 3, encoding: 1, data: new Bytes().u16(6, 10, 0, 0x20, 0xffff).done() }))
+  const table = new Bytes().bytes(cmap(failing)).bytes(new Uint8Array(2000)).done()
+  const capped = parseCmap(table)
+  assert.equal(capped.codes.length, 0)
+  assert.equal(capped.problems.length, 17)
+  assert.ok(capped.problems.slice(0, 16).every((p) => p.startsWith('cmap 3/1 format 6: read of 2 bytes')))
+  assert.equal(capped.problems[16], 'cmap: only the first 16 subtables were tried')
+  // A budget of 3,000 steps is spent in the third subtable; no other is tried.
+  const shared = parseCmap(table, 3000)
+  assert.equal(shared.problems.length, 3)
+  assert.ok(shared.problems[2].includes('reading stopped after 3000 steps'))
+})
+
+test('cmap: codes in descending order come out sorted, first mapping wins', () => {
+  const map = parseCmap(cmap([{ platform: 3, encoding: 10, data: format12([[0x500, 0x501, 7], [0x41, 0x42, 3], [0x41, 0x41, 9]]) }]))
+  assert.deepEqual([...map.codes], [0x41, 0x42, 0x500, 0x501])
+  assert.deepEqual([...map.glyphs], [3, 4, 7, 8])
+})
+
+test('cmap: a damaged preferred subtable falls back to the next one', () => {
+  const damaged = new Bytes().u16(12, 0).u32(1000, 0, 50).u32(0x41, 0x5a, 1).done() // lists 50 groups, holds 1
+  const map = parseCmap(
+    cmap([
+      { platform: 3, encoding: 10, data: damaged },
+      { platform: 3, encoding: 1, data: format4([[0x30, 0x39, 1]]) }
+    ])
+  )
+  assert.equal(map.source, '3/1')
+  assert.equal(map.codes.length, 10)
+  assert.ok(map.problems[0].startsWith('cmap 3/10 format 12:'))
+})
+
+test('cmap: Mac Roman subtables map their high half in every format', () => {
+  const six = parseCmap(cmap([{ platform: 1, encoding: 0, data: format6(0x7f, [1, 2, 3]) }]))
+  // 0x7F stays, 0x80 is Ä, 0x81 is Å.
+  assert.deepEqual([...six.codes], [0x7f, 0xc4, 0xc5])
+  const four = parseCmap(cmap([{ platform: 1, encoding: 0, data: format4([[0xf0, 0xf0, 5]]) }]))
+  assert.deepEqual([...four.codes], [0xf8ff])
+})
+
+// ------------------------------------------------------------------------------------------------
+// 6, 8 · collections: one bad face is marked, shared tables parsed once
+
+test('collection: a face that cannot be read is marked; the others open', () => {
+  const font = sfnt({ name: BASIC_NAME, head: HEAD, cmap: cmap([{ platform: 3, encoding: 1, data: format4([[0x41, 0x5a, 1]]) }]) })
+  const bytes = collection([font], (starts) => [starts[0], 0xfffff0, starts[0]], 3)
+  const opened = openFont(bytes)
+  assert.equal(opened.faces.length, 3)
+  assert.ok(opened.faces[1].error)
+  assert.equal(opened.faces[0], opened.faces[2])
+  const cache = newTableCache()
+  assert.equal(faceLabel(opened.faces[0], 0, 'en', cache), 'Crafted Regular')
+  assert.equal(faceLabel(opened.faces[1], 1, 'en', cache), '#2')
+  const broken = describeFace(opened.faces[1], 'en', cache)
+  assert.ok(broken.damaged)
+  // Faces sharing a cmap share one parse.
+  assert.equal(describeFace(opened.faces[0], 'en', cache).cmap, describeFace(opened.faces[2], 'en', cache).cmap)
+  assert.throws(() => openFont(collection([font], () => [0xfffff0, 0xfffff4], 2)), isDamaged(/no face of the collection/))
+})
+
+/** A name table of `count` records: full name "Shared Face", then filler names. */
+function bigName(count: number): Uint8Array {
+  return nameTable([[3, 1, 0x409, 4, utf16('Shared Face')], ...Array.from({ length: count - 1 }, (_, i) => [3, 1, 0x409, 1000 + i, utf16('x')] as [number, number, number, number, Uint8Array])])
+}
+
+/**
+ * A collection of faces that have only a name table: `copies` copies of `name` lie one after
+ * another (with `slack` spare bytes after the last), and face i points at `place(i, starts)`.
+ */
+function nameCollection(name: Uint8Array, faces: number, copies: number, place: (i: number, starts: number[]) => [offset: number, length: number], slack = 0): Uint8Array {
+  const dataAt = 12 + faces * 4 + faces * 28
+  const starts = Array.from({ length: copies }, (_, c) => dataAt + c * ((name.length + 3) & ~3))
+  const out = new Bytes().tag('ttcf').u32(0x00010000, faces)
+  for (let i = 0; i < faces; i++) out.u32(12 + faces * 4 + i * 28)
+  for (let i = 0; i < faces; i++) {
+    const [offset, length] = place(i, starts)
+    out.u32(0x00010000).u16(1, 16, 0, 0).tag('name').u32(0, offset, length)
+  }
+  for (let c = 0; c < copies; c++) {
+    out.bytes(name)
+    while (out.length % 4) out.u8(0)
+  }
+  return out.bytes(new Uint8Array(slack)).done()
+}
+
+test('collection: faces naming one name table with different lengths parse it once', () => {
+  // 50 faces give the same start and lengths that differ by one: one parse of 1,000 records.
+  const name = bigName(1000)
+  const bytes = nameCollection(name, 50, 1, (i, starts) => [starts[0], name.length + i], 64)
+  const labels = faceLabels(openFont(bytes).faces, 'en', newTableCache(), 5000)
+  assert.deepEqual(labels, Array(50).fill('Shared Face'))
+})
+
+test('collection: face labels share one budget; once it is spent, faces are labelled #n', () => {
+  // 20 copies of a 1,000-record name table, one per face: the budget pays for four parses.
+  const name = bigName(1000)
+  const bytes = nameCollection(name, 20, 20, (i, starts) => [starts[i], name.length])
+  const labels = faceLabels(openFont(bytes).faces, 'en', newTableCache(), 5000)
+  assert.deepEqual(labels.slice(0, 4), Array(4).fill('Shared Face'))
+  assert.deepEqual(labels.slice(4), Array.from({ length: 16 }, (_, i) => `#${i + 5}`))
+  // The real budget labels every face of an ordinary collection.
+  assert.deepEqual(faceLabels(openFont(bytes).faces, 'en'), Array(20).fill('Shared Face'))
+})
+
+test('WOFF2: a collection listing more than 10,000 faces is refused', async () => {
+  await loadBrotliDictionary()
+  const woff2 = (faces: number) =>
+    new Bytes()
+      .tag('wOF2').tag('ttcf').u32(0).u16(1, 0).u32(0, 0).u16(1, 0).u32(0, 0, 0, 0, 0) // header
+      .u8(1, 54) // head, 54 bytes
+      .u32(0x00010000).u8(253).u16(faces) // collection header: version, numFonts as 255UInt16
+      .done()
+  assert.equal(MAX_FACES, 10000)
+  assert.throws(() => openFont(woff2(MAX_FACES + 1)), isDamaged(/collection lists 10001 fonts/))
+})
+
+// ------------------------------------------------------------------------------------------------
+// 7 · tables past the end of the file
+
+test('tables past the end of the file are reported; without head, name or cmap the face is damaged', () => {
+  const view = new DataView(ttfFixture.buffer, ttfFixture.byteOffset, ttfFixture.byteLength)
+  let headOffset = 0
+  for (let t = 0; t < view.getUint16(4); t++) {
+    const record = 12 + t * 16
+    if (String.fromCharCode(...ttfFixture.subarray(record, record + 4)) === 'head') headOffset = view.getUint32(record + 8)
+  }
+  const cut = ttfFixture.slice(0, headOffset)
+  const info = describeFace(openFont(cut).faces[0], 'en')
+  assert.ok(info.problems.some((p) => p.startsWith('head: its 54 bytes lie past the end of the file')))
+  assert.equal(info.damaged, 'head, name, cmap lie past the end of the file')
+  const whole = describeFace(openFont(ttfFixture).faces[0], 'en')
+  assert.equal(whole.damaged, null)
+  assert.deepEqual(whole.problems, [])
+  // head pointed past the end, cmap not listed at all: both are named.
+  const noCmap = sfnt({ name: BASIC_NAME, head: HEAD })
+  new DataView(noCmap.buffer).setUint32(12 + 8, 0x7ffffff0) // head sorts first
+  assert.equal(describeFace(openFont(noCmap).faces[0], 'en').damaged, 'head lies past the end of the file; the font has no cmap table')
+  // In the Russian UI the reason is Russian too.
+  assert.equal(describeFace(openFont(cut).faces[0], 'ru').damaged, 'таблицы head, name, cmap выходят за конец файла')
+  assert.equal(describeFace(openFont(noCmap).faces[0], 'ru').damaged, 'таблица head выходит за конец файла; в шрифте нет таблицы cmap')
+  const noNameOrCmap = sfnt({ head: HEAD })
+  assert.equal(describeFace(openFont(noNameOrCmap).faces[0], 'en').damaged, 'the font has no name, cmap tables')
+  assert.equal(describeFace(openFont(noNameOrCmap).faces[0], 'ru').damaged, 'в шрифте нет таблиц name, cmap')
+})
+
+// ------------------------------------------------------------------------------------------------
+// Faces cut out of a collection: overlapping or oversized tables are refused
+
+/**
+ * A one-face collection with the crafted font's own tables, then `aliases` more tags, each
+ * `[offset, length]` from `alias(fileSize, starts)`.
+ */
+function aliasedCollection(aliases: number, alias: (fileSize: number, starts: number[]) => [number, number]): Uint8Array {
+  const tables: Record<string, Uint8Array> = { cmap: cmap([{ platform: 3, encoding: 1, data: format4([[0x41, 0x5a, 1]]) }]), head: HEAD, name: BASIC_NAME }
+  const tags = Object.keys(tables)
+  const numTables = tags.length + aliases
+  let offset = 16 + 12 + numTables * 16
+  const starts = tags.map((tag) => {
+    const at = offset
+    offset += (tables[tag].length + 3) & ~3
+    return at
+  })
+  const fileSize = offset
+  const out = new Bytes().tag('ttcf').u32(0x00010000, 1, 16).u32(0x00010000).u16(numTables, 0, 0, 0)
+  tags.forEach((tag, i) => out.tag(tag).u32(0, starts[i], tables[tag].length))
+  for (let a = 0; a < aliases; a++) out.tag(`z${String(a).padStart(3, '0')}`).u32(0, ...alias(fileSize, starts))
+  for (const tag of tags) {
+    out.bytes(tables[tag])
+    while (out.length % 4) out.u8(0)
+  }
+  return out.done()
+}
+
+test('a collection face whose tables add up to more than the file is not cut out', () => {
+  // 300 tags that each name the whole file would make a cut-out 300 times its size.
+  const bytes = aliasedCollection(300, (fileSize) => [0, fileSize])
+  const container = openFont(bytes)
+  assert.equal(describeFace(container.faces[0], 'en').family, 'Crafted')
+  const source = renderSource(container, 0, bytes)
+  assert.equal(source.kind, 'error')
+  assert.ok(source.kind === 'error' && /tables add up to \d+ bytes, more than \d+/.test(source.message))
+  assert.throws(() => faceToSfnt(container.faces[0], 1 << 20), isDamaged(/add up to/))
+})
+
+test('a collection face whose tables overlap is not cut out', () => {
+  // One extra tag: four bytes inside cmap, so the total still fits the file.
+  const bytes = aliasedCollection(1, (_, starts) => [starts[0] + 4, 4])
+  const source = renderSource(openFont(bytes), 0, bytes)
+  assert.deepEqual(source, { kind: 'error', message: 'tables cmap and z000 of the face overlap' })
+  // Without the extra tag the same face cuts out.
+  const plain = aliasedCollection(0, () => [0, 0])
+  assert.equal(renderSource(openFont(plain), 0, plain).kind, 'bytes')
+})
+
+// ------------------------------------------------------------------------------------------------
+// Monospaced: post, OS/2 PANOSE, or the advances of printable ASCII
+
+type MetricsOptions = {
+  advance: (glyph: number) => number
+  panose?: number[]
+  fixedPitch?: boolean
+  glyphs?: number
+  /** cmap groups [first, last, glyph]; U+0021–007E to glyphs 1–94 by default. */
+  groups?: [number, number, number][]
+  /** 12: each code its own glyph from the group's first; 13: the whole group on one glyph. */
+  format?: 12 | 13
+}
+
+/**
+ * A font with `glyphs` glyphs whose advances `advance` gives, the characters `groups` maps, post's
+ * isFixedPitch and OS/2's PANOSE bytes.
+ */
+function metricsFont({ advance, panose = [], fixedPitch = false, glyphs = 95, groups = [[0x21, 0x7e, 1]], format = 12 }: MetricsOptions): Uint8Array {
+  const os2 = new Bytes()
+    .u16(0, 600, 400, 5, 0) // version, xAvgCharWidth, weight, width, fsType
+    .u16(...Array(11).fill(0)) // sub- and superscripts, strikeout, family class
+    .u8(...panose, ...Array(10 - panose.length).fill(0))
+    .u32(0, 0, 0, 0)
+    .tag('TEST')
+    .u16(0x40, 0x21, 0x7e, 800, -200, 0, 800, 200) // fsSelection … winDescent
+    .done()
+  const hhea = new Bytes().u32(0x00010000).u16(800, -200, 0, 1800, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, glyphs).done()
+  const hmtx = new Bytes()
+  for (let glyph = 0; glyph < glyphs; glyph++) hmtx.u16(advance(glyph), 0)
+  return sfnt({
+    'OS/2': os2,
+    cmap: cmap([{ platform: 3, encoding: 10, data: format12(groups, format) }]),
+    head: HEAD,
+    hhea,
+    hmtx: hmtx.done(),
+    name: BASIC_NAME,
+    post: new Bytes().u32(0x00030000).fixed(0).u16(-100, 50).u32(fixedPitch ? 1 : 0, 0, 0, 0, 0).done()
+  })
+}
+
+const monospace = (bytes: Uint8Array) => describeFace(openFont(bytes).faces[0], 'en').monospace
+
+test('monospaced: a Noto Sans Mono-like font, whose post says proportional, by its PANOSE', () => {
+  // Noto Sans Mono: isFixedPitch 0, PANOSE 2 11 5 9 …; ASCII at 600, wide glyphs at 1200 and 1800.
+  const noto = (glyph: number) => (glyph < 95 ? 600 : glyph % 10 === 0 ? 1800 : 1200)
+  assert.equal(monospace(metricsFont({ advance: noto, panose: [2, 11, 5, 9, 4, 5, 4, 2, 2, 4], glyphs: 400 })), true)
+  // PANOSE 2/9 alone is enough, whatever the advances.
+  assert.equal(monospace(metricsFont({ advance: (glyph) => 300 + glyph * 7, panose: [2, 11, 5, 9] })), true)
+  // Monospaced proportion means it only for Latin Text: 9 in a decorative font's fourth byte is not it.
+  assert.equal(monospace(metricsFont({ advance: (glyph) => 300 + glyph * 7, panose: [4, 0, 0, 9] })), false)
+  assert.equal(monospace(metricsFont({ advance: () => 600, fixedPitch: true, glyphs: 2 })), true)
+})
+
+test('monospaced: by the advances of printable ASCII when post and PANOSE say nothing', () => {
+  // Roboto Mono-like: PANOSE family type 0, every glyph 1229.
+  assert.equal(monospace(metricsFont({ advance: () => 1229 })), true)
+  // Three of 94 ASCII glyphs wider (under 5 %): still monospaced.
+  assert.equal(monospace(metricsFont({ advance: (glyph) => (glyph === 10 || glyph === 20 || glyph === 30 ? 1200 : 600) })), true)
+  // Proportional Latin.
+  assert.equal(monospace(metricsFont({ advance: (glyph) => 300 + (glyph % 9) * 50 })), false)
+  // A CJK-like font: proportional ASCII, then 2,000 glyphs one em wide; they do not count.
+  assert.equal(monospace(metricsFont({ advance: (glyph) => (glyph < 95 ? 300 + (glyph % 9) * 50 : 1000), glyphs: 2095 })), false)
+  // Glyphs past numberOfHMetrics take the last advance; a record past the table is not measured.
+  assert.deepEqual(advanceWidths(new Bytes().u16(500, 0, 700, 0).done(), 2, [0, 1, 5]), [500, 700, 700])
+  assert.deepEqual(advanceWidths(new Bytes().u16(500, 0).done(), 3, [0, 2]), [500, null])
+  // The test fixture has four ASCII letters at 600: too few to tell.
+  assert.equal(monospace(ttfFixture), false)
+})
+
+test('monospaced: the ASCII rule needs 90 ASCII characters on glyphs of their own', () => {
+  // 90 of the 94 are enough, 89 are not.
+  assert.equal(monospace(metricsFont({ advance: () => 600, groups: [[0x21, 0x7a, 1]] })), true)
+  assert.equal(monospace(metricsFont({ advance: () => 600, groups: [[0x21, 0x79, 1]] })), false)
+  // An emoji font (Apple Color Emoji, Noto Color Emoji) maps only the keycap bases "#*0-9", all
+  // one width.
+  const keycaps: [number, number, number][] = [[0x23, 0x23, 1], [0x2a, 0x2a, 2], [0x30, 0x39, 3], [0x1f600, 0x1f64f, 13]]
+  assert.equal(monospace(metricsFont({ advance: () => 800, groups: keycaps, glyphs: 93 })), false)
+  // A fallback font (LastResort) draws all of ASCII with one glyph.
+  assert.equal(monospace(metricsFont({ advance: () => 2253, groups: [[0x21, 0x7e, 1]], format: 13, glyphs: 3 })), false)
+  // Two ASCII characters on one glyph are enough to tell it is not a text font.
+  const shared: [number, number, number][] = [[0x21, 0x7d, 1], [0x7e, 0x7e, 1]]
+  assert.equal(monospace(metricsFont({ advance: () => 600, groups: shared })), false)
+})
+
+test('monospaced: the ASCII width must be the width of 80% of the glyphs the font maps', () => {
+  // A dual-width CJK font (SimSong, PCMyungjo): half-width ASCII all 500, then 2,000 mapped
+  // ideographs at 1000.
+  const ideographs: [number, number, number][] = [[0x21, 0x7e, 1], [0x4e00, 0x4e00 + 1999, 95]]
+  assert.equal(monospace(metricsFont({ advance: (glyph) => (glyph < 95 ? 500 : 1000), groups: ideographs, glyphs: 2095 })), false)
+  // Noto Sans Mono by its advances alone: ASCII and most other glyphs at 600, a few wide ones.
+  const noto: [number, number, number][] = [[0x21, 0x7e, 1], [0x400, 0x400 + 299, 95]]
+  const notoAdvance = (glyph: number) => (glyph < 95 || glyph % 6 !== 0 ? 600 : 1200)
+  assert.equal(monospace(metricsFont({ advance: notoAdvance, groups: noto, glyphs: 395 })), true)
+  // Unmapped glyphs do not count: a font with wide glyphs only for its ligatures stays monospaced.
+  assert.equal(monospace(metricsFont({ advance: (glyph) => (glyph < 95 ? 600 : 1800), glyphs: 2095 })), true)
+})
+
+// ------------------------------------------------------------------------------------------------
+// 16 · head checksum of a face cut out of a collection
+
+test('a cut-out face has valid table checksums and checkSumAdjustment', () => {
+  const font = sfnt({ name: BASIC_NAME, head: HEAD, cmap: cmap([]) })
+  const single = faceToSfnt(openFont(collection([font])).faces[0])
+  const view = new DataView(single.buffer)
+  const sum = (from: number, length: number) => {
+    let total = 0
+    for (let i = from; i < from + length; i += 4) total = (total + view.getUint32(i)) >>> 0
+    return total
+  }
+  for (let t = 0; t < view.getUint16(4); t++) {
+    const record = 12 + t * 16
+    const tag = String.fromCharCode(...single.subarray(record, record + 4))
+    const offset = view.getUint32(record + 8)
+    const length = (view.getUint32(record + 12) + 3) & ~3
+    let expected = sum(offset, length)
+    if (tag === 'head') expected = (expected - view.getUint32(offset + 8)) >>> 0
+    assert.equal(view.getUint32(record + 4), expected, tag)
+  }
+  assert.equal(sum(0, single.length), 0xb1b0afba)
+})

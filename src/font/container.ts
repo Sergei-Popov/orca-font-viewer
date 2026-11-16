@@ -2,8 +2,10 @@
 // collections, WOFF 1.0 (zlib per table) and WOFF 2.0 (one Brotli stream). The result is each
 // face's tables as plain bytes, which src/font/tables.ts reads. WOFF2's transformed glyf, loca and
 // hmtx are not rebuilt: the viewer never reads glyph outlines, Chromium draws the font itself.
+// WOFF 2.0 needs the Brotli dictionary: `loadBrotliDictionary()` (./brotli-dictionary) must have
+// finished before `openFont` reads such a file; `needsBrotliDictionary` tells when it has not.
 
-import { decompress as brotliDecompress } from '../../vendor/brotli/brotli.mjs'
+import { decompress as brotliDecompress, hasDictionary } from '../../vendor/brotli/brotli.mjs'
 import { unzlibSync } from '../../vendor/fflate/fflate.mjs'
 import { FontError, Reader, tagValue } from './bytes'
 
@@ -38,8 +40,8 @@ export type Limits = {
 
 export const DEFAULT_LIMITS: Limits = { maxUnpackedBytes: 256 * 1024 * 1024 }
 
-/** Faces a collection may list; real ones have a few dozen at most. */
-const MAX_FACES = 10000
+/** Faces a collection (sfnt or WOFF 2.0) may list; real ones have a few dozen at most. */
+export const MAX_FACES = 10000
 
 export type FontContainer = {
   flavor: Flavor
@@ -71,6 +73,11 @@ export function sniffFlavor(bytes: Uint8Array): (Flavor | 'collection') | null {
   if (signature === TAG_WOFF) return 'woff'
   if (signature === TAG_WOF2) return 'woff2'
   return null
+}
+
+/** A WOFF 2.0 file that cannot be opened until the Brotli dictionary is loaded. */
+export function needsBrotliDictionary(bytes: Uint8Array): boolean {
+  return sniffFlavor(bytes) === 'woff2' && !hasDictionary()
 }
 
 export function openFont(bytes: Uint8Array, limits: Limits = DEFAULT_LIMITS): FontContainer {
@@ -297,6 +304,9 @@ function readWoff2(bytes: Uint8Array, limits: Limits): FontContainer {
   if (collection) {
     cursor.u32() // collection header version
     const numFonts = cursor.u255()
+    if (numFonts === 0 || numFonts > MAX_FACES) {
+      throw new FontError('damaged', `collection lists ${numFonts} fonts`)
+    }
     faceIndices = []
     for (let f = 0; f < numFonts; f++) {
       const count = cursor.u255()
@@ -311,6 +321,10 @@ function readWoff2(bytes: Uint8Array, limits: Limits): FontContainer {
     faceIndices = [{ sfntVersion: flavor, indices: entries.map((_, i) => i) }]
   }
 
+  if (!hasDictionary()) {
+    // A caller's mistake, not a damaged file: never shown as one.
+    throw new Error('the Brotli dictionary is not loaded; await loadBrotliDictionary() first')
+  }
   const compressed = r.slice(cursor.offset, totalCompressedSize)
   const expected = entries.reduce((sum, e) => sum + e.transformLength, 0)
   if (expected > limits.maxUnpackedBytes) {
@@ -368,13 +382,35 @@ function readWoff2(bytes: Uint8Array, limits: Limits): FontContainer {
   }
 }
 
+/** Most bytes of tables a face cut out of a collection may have. */
+export const MAX_CUT_OUT_BYTES = 64 * 1024 * 1024
+
 /**
  * A standalone sfnt with one face's tables, for faces of a collection: Chromium's FontFace loads
  * only single fonts. Tables are copied in tag order, 4-byte aligned, with their checksums; head's
  * checkSumAdjustment is zeroed for its checksum and then set for the new file, as the spec says.
+ * A face whose tables overlap, or add up to more than `maxBytes` (the file's size for a sfnt
+ * collection), is refused: a crafted directory could otherwise name the whole file hundreds of
+ * times and make the copy gigabytes long.
  */
-export function faceToSfnt(face: Face): Uint8Array {
+export function faceToSfnt(face: Face, maxBytes = MAX_CUT_OUT_BYTES): Uint8Array {
   const tags = [...face.tables.keys()].sort()
+  let tableBytes = 0
+  for (const tag of tags) tableBytes += face.tables.get(tag)!.byteLength
+  if (tableBytes > maxBytes) {
+    throw new FontError('damaged', `the face's tables add up to ${tableBytes} bytes, more than ${maxBytes}`)
+  }
+  const ranges = tags
+    .map((tag) => ({ tag, bytes: face.tables.get(tag)! }))
+    .filter((range) => range.bytes.byteLength > 0)
+    .sort((a, b) => a.bytes.byteOffset - b.bytes.byteOffset)
+  for (let i = 1; i < ranges.length; i++) {
+    const before = ranges[i - 1].bytes
+    const after = ranges[i].bytes
+    if (after.buffer === before.buffer && after.byteOffset < before.byteOffset + before.byteLength) {
+      throw new FontError('damaged', `tables ${ranges[i - 1].tag} and ${ranges[i].tag} of the face overlap`)
+    }
+  }
   const numTables = tags.length
   const headerSize = 12 + numTables * 16
   let total = headerSize

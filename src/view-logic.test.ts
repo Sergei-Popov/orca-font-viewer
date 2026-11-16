@@ -1,5 +1,5 @@
 import { assert, test } from 'orca/testing'
-import { ALPHABET_LINES, alphabetLines, defaultSample, embeddingLabel, formatBytes, formatDate, weightLabel, widthLabel } from './describe'
+import { ALPHABET_LINES, alphabetLines, defaultSample, embeddingLabel, formatBytes, formatDate, formatFixed, weightLabel, widthLabel } from './describe'
 import {
   blockLabel,
   blockOf,
@@ -9,6 +9,7 @@ import {
   htmlEntity,
   isInvisible,
   jsEscape,
+  fontBlockNames,
   matchesQuery,
   parseCharQuery,
   uPlus,
@@ -17,12 +18,30 @@ import {
 import { featureName, featureSettings, isOnByDefault, isUserFeature, variationSettings } from './font/features'
 import { openFont } from './font/container'
 import { describeFace } from './font/info'
-import { otfFixture, ttfFixture } from './font/test-fixtures'
-import { groupByBlock, layoutGrid, moveInGrid, rowOf, visibleRange } from './grid'
+import { otfFixture, ttfFixture } from './font/test-fonts'
+import { NO_BLOCK, blockOptions, groupByBlock, inBlockFilter, layoutGrid, moveInGrid, queryGroups, rowOf, visibleRange } from './grid'
 import { fill, stringsFor } from './i18n'
 
 const en = stringsFor('en-US')
 const ru = stringsFor('ru')
+
+test('the block filter has one option for all the gaps between blocks, apart from every block', () => {
+  // Two gaps (U+2FE0 and U+10200) around Basic Latin, CJK Symbols and Lycian.
+  const codes = Uint32Array.from([0x41, 0x42, 0x2fe0, 0x2fe1, 0x3001, 0x10200, 0x10280])
+  const groups = groupByBlock(codes)
+  assert.deepEqual(groups.map((group) => group.block), ['Basic Latin', '', 'CJK Symbols and Punctuation', '', 'Lycian'])
+  assert.deepEqual(blockOptions(groups), [
+    { value: 'Basic Latin', block: 'Basic Latin', count: 2 },
+    { value: 'CJK Symbols and Punctuation', block: 'CJK Symbols and Punctuation', count: 1 },
+    { value: 'Lycian', block: 'Lycian', count: 1 },
+    { value: NO_BLOCK, block: '', count: 3 }
+  ])
+  const shown = (value: string) => groupByBlock(codes, (_, block) => inBlockFilter(value, block)).flatMap((group) => group.codes)
+  assert.deepEqual(shown(NO_BLOCK), [0x2fe0, 0x2fe1, 0x10200])
+  assert.deepEqual(shown('Lycian'), [0x10280])
+  assert.equal(shown('').length, codes.length)
+  assert.deepEqual(blockOptions(groupByBlock(Uint32Array.from([0x41]))), [{ value: 'Basic Latin', block: 'Basic Latin', count: 1 }])
+})
 
 test('names Unicode blocks, including gaps', () => {
   assert.equal(blockOf(0x41), 'Basic Latin')
@@ -49,30 +68,90 @@ test('writes a code point in every notation', () => {
   assert.ok(isInvisible(0x20) === false && isInvisible(0x200b) && isInvisible(0x0a))
 })
 
+/** A Latin and Cyrillic font's block names, in the English and the Russian UI. */
+const LATIN_CYRILLIC = ['Basic Latin', 'Latin-1 Supplement', 'Cyrillic']
+const EN_NAMES = fontBlockNames(LATIN_CYRILLIC, 'en')
+const RU_NAMES = fontBlockNames(LATIN_CYRILLIC, 'ru')
+
 test('understands the Characters search box', () => {
-  assert.deepEqual(parseCharQuery(''), { kind: 'all' })
-  const one = parseCharQuery('U+0411')
+  assert.deepEqual(EN_NAMES, LATIN_CYRILLIC)
+  assert.deepEqual(RU_NAMES, ['Basic Latin', 'Основная латиница', 'Latin-1 Supplement', 'Латиница-1, дополнение', 'Cyrillic', 'Кириллица'])
+  assert.deepEqual(parseCharQuery('', EN_NAMES), { kind: 'all' })
+  const one = parseCharQuery('U+0411', EN_NAMES)
   assert.ok(one.kind === 'codes' && one.codes.has(0x411) && one.codes.size === 1)
-  const several = parseCharQuery('0x41, u+42')
+  const several = parseCharQuery('0x41, u+42', EN_NAMES)
   assert.ok(several.kind === 'codes' && several.codes.has(0x41) && several.codes.has(0x42))
-  const range = parseCharQuery('U+0400-04FF')
+  const range = parseCharQuery('U+0400-04FF', EN_NAMES)
   assert.deepEqual(range, { kind: 'range', from: 0x400, to: 0x4ff })
-  const typed = parseCharQuery('Ёж')
+  const typed = parseCharQuery('Ёж', EN_NAMES)
   assert.ok(typed.kind === 'codes' && typed.codes.has(0x401) && typed.codes.has(0x436))
-  assert.deepEqual(parseCharQuery('cyrillic'), { kind: 'block', text: 'cyrillic' })
-  assert.deepEqual(parseCharQuery('Кирил'), { kind: 'block', text: 'кирил' })
-  assert.ok(matchesQuery(parseCharQuery('cyril'), 0x411, 'Cyrillic', 'Кириллица'))
-  assert.ok(matchesQuery(parseCharQuery('кирил'), 0x411, 'Cyrillic', 'Кириллица'))
-  assert.ok(!matchesQuery(parseCharQuery('greek'), 0x411, 'Cyrillic', 'Cyrillic'))
+  assert.deepEqual(parseCharQuery('cyrillic', EN_NAMES), { kind: 'block', text: 'cyrillic' })
+  assert.deepEqual(parseCharQuery('Кирил', RU_NAMES), { kind: 'block', text: 'кирил' })
+  // English names work in the Russian UI too; Russian ones only there.
+  assert.deepEqual(parseCharQuery('cyrillic', RU_NAMES), { kind: 'block', text: 'cyrillic' })
+  assert.equal(parseCharQuery('Кирил', EN_NAMES).kind, 'codes')
+  assert.ok(matchesQuery(parseCharQuery('cyril', EN_NAMES), 0x411, 'Cyrillic', 'Cyrillic'))
+  assert.ok(matchesQuery(parseCharQuery('кирил', RU_NAMES), 0x411, 'Cyrillic', 'Кириллица'))
+})
+
+test('words that name no block of the font are searched as the characters typed', () => {
+  // The font has no Greek block: "greek" is the letters g, r, e, k.
+  const greek = parseCharQuery('greek', EN_NAMES)
+  assert.ok(greek.kind === 'codes' && greek.codes.size === 4 && greek.codes.has(0x67) && greek.codes.has(0x6b))
+  assert.ok(!matchesQuery(greek, 0x391, 'Greek and Coptic', 'Greek and Coptic'))
+  assert.equal(parseCharQuery('greek', fontBlockNames(['Greek and Coptic'], 'en')).kind, 'block')
+  // A word or a sentence longer than eight letters is its characters too.
+  const sentence = parseCharQuery('Съешь же ещё этих', RU_NAMES)
+  assert.ok(sentence.kind === 'codes' && sentence.codes.has(0x44a) && sentence.codes.has(0x451) && !sentence.codes.has(0x20))
+  const word = parseCharQuery('Typography', EN_NAMES)
+  assert.ok(word.kind === 'codes' && word.codes.size === 8)
+})
+
+test('block names match where a word starts; a short word that only starts one also shows its characters', () => {
+  // "ate", "the" and "ion" lie inside words of block names (Private, Mathematical, Extensions).
+  const english = fontBlockNames(['Basic Latin', 'Private Use Area', 'Mathematical Operators', 'IPA Extensions', 'General Punctuation'], 'en')
+  for (const word of ['ate', 'the', 'ion']) assert.equal(parseCharQuery(word, english).kind, 'codes', word)
+  assert.equal(parseCharQuery('ext', english).kind, 'block')
+  // An Arial-like font with a CJK ideograph, in the Russian UI.
+  const blocks = ['Basic Latin', 'Cyrillic', 'Currency Symbols', 'Letterlike Symbols', 'Mathematical Operators', 'CJK Unified Ideographs']
+  const names = fontBlockNames(blocks, 'ru')
+  const codes = Uint32Array.from(
+    [...'CJKLabcilnrty', ...'АКаилмрст', '€', '№', '∑', '中'].map((c) => c.codePointAt(0)!).sort((a, b) => a - b)
+  )
+  const shown = (query: string, filter = '') =>
+    queryGroups(codes, parseCharQuery(query, names, codes), filter, (block) => blockLabel(block, 'ru', '-')).map(
+      (group) => `${group.block}: ${String.fromCodePoint(...group.codes)}`
+    )
+  // "сим" starts "символы", and с, и, м are in the font: they come first, then the symbol blocks.
+  assert.deepEqual(shown('сим'), ['Cyrillic: имс', 'Currency Symbols: €', 'Letterlike Symbols: №'])
+  assert.deepEqual(shown('лат'), ['Cyrillic: алт', 'Basic Latin: CJKLabcilnrty'])
+  assert.deepEqual(shown('мат'), ['Cyrillic: амт', 'Mathematical Operators: ∑'])
+  // The block filter applies to both parts.
+  assert.deepEqual(shown('сим', 'Currency Symbols'), ['Currency Symbols: €'])
+  // A letter the font lacks (в): the blocks only.
+  assert.deepEqual(shown('симв'), ['Currency Symbols: €', 'Letterlike Symbols: №'])
+  // Whole words of a block name, longer words and code points work as before.
+  assert.deepEqual(shown('Latin'), ['Basic Latin: CJKLabcilnrty'])
+  assert.deepEqual(shown('Cyrillic'), ['Cyrillic: АКаилмрст'])
+  assert.deepEqual(shown('basic latin'), ['Basic Latin: CJKLabcilnrty'])
+  assert.deepEqual(shown('CJK'), ['CJK Unified Ideographs: 中'])
+  assert.deepEqual(shown('Кириллица'), ['Cyrillic: АКаилмрст'])
+  // "Кирил" only starts "Кириллица", but its letters are in that block: they are not shown twice.
+  assert.deepEqual(shown('Кирил'), ['Cyrillic: АКаилмрст'])
+  assert.deepEqual(shown('U+0441'), ['Cyrillic: с'])
+  // "ate" starts no word of a block name: its letters, those the font has.
+  assert.deepEqual(shown('ate'), ['Basic Latin: at'])
 })
 
 test('reads block names, ranges and punctuation in the search box the way they are meant', () => {
-  const block = (query: string, code: number, name: string) => matchesQuery(parseCharQuery(query), code, name, name)
+  const names = ['Latin-1 Supplement', 'Box Drawing', 'IPA Extensions', 'Greek Extended', 'Greek and Coptic', 'NKo']
+  const parse = (query: string) => parseCharQuery(query, names)
+  const block = (query: string, code: number, name: string) => matchesQuery(parse(query), code, name, name)
   // Separators alone search for nothing.
-  assert.deepEqual(parseCharQuery(','), { kind: 'all' })
-  assert.deepEqual(parseCharQuery(' , ,'), { kind: 'all' })
+  assert.deepEqual(parse(','), { kind: 'all' })
+  assert.deepEqual(parse(' , ,'), { kind: 'all' })
   // Block names with digits, hyphens and abbreviations are not ranges or typed letters.
-  assert.equal(parseCharQuery('latin-1').kind, 'block')
+  assert.equal(parse('latin-1').kind, 'block')
   assert.ok(block('latin-1', 0xe9, 'Latin-1 Supplement'))
   assert.ok(block('box draw', 0x2500, 'Box Drawing'))
   assert.ok(block('IPA ext', 0x250, 'IPA Extensions'))
@@ -80,13 +159,13 @@ test('reads block names, ranges and punctuation in the search box the way they a
   assert.ok(!block('greek ext', 0x391, 'Greek and Coptic'))
   assert.ok(block("n'ko", 0x7c0, 'NKo'))
   // Short letter runs are typed characters, a ligature included.
-  const ffi = parseCharQuery('ffi')
+  const ffi = parse('ffi')
   assert.ok(ffi.kind === 'codes' && ffi.codes.has(0x66) && ffi.codes.has(0x69) && ffi.codes.size === 2)
   // Ranges, with or without prefixes and in several notations.
-  assert.deepEqual(parseCharQuery('U+0400..U+04FF'), { kind: 'range', from: 0x400, to: 0x4ff })
-  assert.deepEqual(parseCharQuery('400-4FF'), { kind: 'range', from: 0x400, to: 0x4ff })
-  assert.deepEqual(parseCharQuery('0x4FF – 0x400'), { kind: 'range', from: 0x400, to: 0x4ff })
-  assert.notEqual(parseCharQuery('ab-cd').kind, 'range')
+  assert.deepEqual(parse('U+0400..U+04FF'), { kind: 'range', from: 0x400, to: 0x4ff })
+  assert.deepEqual(parse('400-4FF'), { kind: 'range', from: 0x400, to: 0x4ff })
+  assert.deepEqual(parse('0x4FF – 0x400'), { kind: 'range', from: 0x400, to: 0x4ff })
+  assert.notEqual(parse('ab-cd').kind, 'range')
 })
 
 test('arrow keys keep the column across block boundaries', () => {
@@ -124,10 +203,19 @@ test('measures coverage of sorted code points', () => {
 })
 
 test('describes weights, widths and embedding rights', () => {
-  assert.equal(weightLabel(700), '700 (Bold)')
-  assert.equal(weightLabel(450), '450 (≈ Regular)')
-  assert.equal(widthLabel(5), '5 (Normal)')
-  assert.equal(widthLabel(12), '12')
+  assert.equal(weightLabel(700, 'en'), '700 (Bold)')
+  assert.equal(weightLabel(450, 'en'), '450 (≈ Regular)')
+  assert.equal(widthLabel(5, 'en'), '5 (Normal)')
+  assert.equal(widthLabel(12, 'en'), '12')
+  // Russian names in the Russian UI, and Russian decimals.
+  assert.equal(weightLabel(700, 'ru'), '700 (Жирный)')
+  assert.equal(weightLabel(950, 'ru'), '950 (Сверхчёрный)')
+  assert.equal(weightLabel(380, 'ru'), '380 (≈ Обычный)')
+  assert.equal(widthLabel(3, 'ru'), '3 (Сжатый)')
+  assert.equal(widthLabel(9, 'ru'), '9 (Ультрарасширенный)')
+  assert.equal(formatFixed(1.25, 2, 'ru'), '1,25')
+  assert.equal(formatFixed(1.2, 2, 'en'), '1.20')
+  assert.equal(fill(ru.cmapSymbol, { source: '3/0' }), '3/0 (символьный шрифт)')
   assert.equal(embeddingLabel(0, en), en.embedInstallable)
   assert.equal(embeddingLabel(0x0002, en), en.embedRestricted)
   assert.equal(embeddingLabel(0x0004, en), en.embedPreview)
@@ -167,6 +255,8 @@ test('picks a sample the font can draw', () => {
 test('offers user-facing feature switches with names', () => {
   assert.equal(featureName('smcp', null, 'en'), 'Small capitals')
   assert.equal(featureName('smcp', null, 'ru'), 'Капитель')
+  assert.equal(featureName('pcap', null, 'ru'), 'Мини-капитель')
+  assert.equal(featureName('c2pc', null, 'ru'), 'Прописные в мини-капитель')
   assert.equal(featureName('ss03', null, 'en'), 'Stylistic set 3')
   assert.equal(featureName('cv11', null, 'ru'), 'Вариант знака 11')
   assert.equal(featureName('ss01', 'Single-storey a', 'en'), 'Single-storey a')

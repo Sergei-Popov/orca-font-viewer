@@ -15,6 +15,11 @@ All notable changes to this plugin are documented here. The format follows
   when the first WOFF 2.0 file opens. Fonts decode byte for byte as before.
 - The fonts the unit tests read are written in code, table by table (`src/font/test-fonts.ts`), in
   place of base64 copies; the repository holds no font data.
+- Listing images and description: a new cover and five screenshots in the hub's house style
+  (variable axes, OpenType features, characters by Unicode block, a font collection's faces, the
+  Info tab), built by `scripts/listing-image.sh` from `tools/listing.json` with OFL demo fonts
+  that `tools/listing-samples.sh` downloads at pinned sha256s and never commits. The manifest
+  lists each image with its alt text only, and the description is shorter (298 characters).
 
 ## [0.1.0] - 2026-11-14
 

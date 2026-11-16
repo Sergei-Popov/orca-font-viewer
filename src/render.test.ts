@@ -1,10 +1,12 @@
 import { assert, test } from 'orca/testing'
+import { loadBrotliDictionary } from './font/brotli-dictionary'
 import { openFont } from './font/container'
 import { describeFace } from './font/info'
-import { otfFixture, ttcFixture, ttfFixture, woff2Fixture } from './font/test-fixtures'
+import { otfFixture, ttcFixture, ttfFixture, woff2Fixture } from './font/test-fonts'
 import { axesFor, faceStyle, fontMime, renderSource, snapAxisValue } from './render'
 
-test('draws a single font from its own bytes and a collection face as a standalone font', () => {
+test('draws a single font from its own bytes and a collection face as a standalone font', async () => {
+  await loadBrotliDictionary()
   const single = renderSource(openFont(woff2Fixture), 0, woff2Fixture)
   assert.ok(single.kind === 'bytes' && single.bytes === woff2Fixture)
   const collection = openFont(ttcFixture)
@@ -18,7 +20,8 @@ test('draws a single font from its own bytes and a collection face as a standalo
   assert.equal(describeFace(reopened.faces[0], 'en').family, 'Fixture Mono')
 })
 
-test('a WOFF2 collection with transformed outlines draws only its first face', () => {
+test('a WOFF2 collection with transformed outlines draws only its first face', async () => {
+  await loadBrotliDictionary()
   const container = openFont(woff2Fixture)
   const fake = { ...container, collection: true, faces: [container.faces[0], container.faces[0]] }
   const transformed = container.faces[0].tableList.some((table) => table.transformed)

@@ -72,11 +72,12 @@ orca plugin shot local.font-viewer --editor "$PWD/path/to/font.ttf"   # PNG of t
 - `src/font/` — the font parser, DOM-free: `container.ts` (sfnt, collections, WOFF, WOFF2, cutting a
   face out of a collection), `tables.ts` (name, head, hhea, maxp, post, OS/2, cmap, fvar,
   GSUB/GPOS feature lists), `info.ts`, `features.ts`, `chars.ts`, `blocks-data.ts` (Unicode 16.0
-  blocks). Tested in `src/font/font.test.ts` against fonts built by `tools/make-fixtures.py`.
+  blocks), `brotli-dictionary.ts` (loads the Brotli dictionary on the first WOFF 2.0 file). Tested
+  in `src/font/*.test.ts` against fonts that `src/font/test-fonts.ts` writes table by table.
 - `src/describe.ts`, `src/grid.ts`, `src/render.ts` — pure helpers for the view, tested in
   `src/view-logic.test.ts` and `src/render.test.ts`.
-- `tools/` — generators for the test fonts, the block table and the icons (`make-icons.py` draws
-  "Aa" from STIXGeneral, OFL; `rasterize-icons.sh` makes the PNGs).
+- `tools/` — generators for the block table, the Brotli dictionary word list and the icons
+  (`make-icons.py` draws "Aa" from STIXGeneral, OFL; `rasterize-icons.sh` makes the PNGs).
 - `vendor/` — [fflate](https://github.com/101arrowz/fflate) 0.8.3 (MIT) for WOFF 1.0 and
   [brotli.js](https://github.com/devongovett/brotli.js) 2.1.0 (MIT, Google's decoder Apache-2.0)
   for WOFF 2.0; see `vendor/README.md`.

@@ -17,7 +17,7 @@ import {
 import { featureName, featureSettings, isOnByDefault, isUserFeature, variationSettings } from './font/features'
 import { openFont } from './font/container'
 import { describeFace } from './font/info'
-import { otfFixture, ttfFixture } from './font/test-fixtures'
+import { otfFixture, ttfFixture } from './font/test-fonts'
 import { groupByBlock, layoutGrid, moveInGrid, rowOf, visibleRange } from './grid'
 import { fill, stringsFor } from './i18n'
 

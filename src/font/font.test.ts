@@ -1,8 +1,9 @@
 import { assert, test } from 'orca/testing'
+import { loadBrotliDictionary } from './brotli-dictionary'
 import { FontError } from './bytes'
-import { faceToSfnt, openFont, sniffFlavor } from './container'
+import { faceToSfnt, needsBrotliDictionary, openFont, sniffFlavor } from './container'
 import { describeFace, faceLabel } from './info'
-import { otfFixture, ttcFixture, ttfFixture, woff2Fixture, woffFixture } from './test-fixtures'
+import { otfFixture, ttcFixture, ttfFixture, woff2Fixture, woffFixture } from './test-fonts'
 
 const isFontError = (code: string) => (error: unknown) => error instanceof FontError && error.code === code
 
@@ -71,7 +72,12 @@ test('reads a WOFF 1.0 font, inflating its tables', () => {
   assert.deepEqual([...font.faces[0].tables.get('cmap')!], [...plain.tables.get('cmap')!])
 })
 
-test('reads a WOFF 2.0 font through Brotli, skipping transformed tables', () => {
+test('reads a WOFF 2.0 font through Brotli once the dictionary is loaded, skipping transformed tables', async () => {
+  if (needsBrotliDictionary(woff2Fixture)) {
+    assert.throws(() => openFont(woff2Fixture), (error: unknown) => !(error instanceof FontError) && /dictionary is not loaded/.test(String(error)))
+  }
+  await loadBrotliDictionary()
+  assert.equal(needsBrotliDictionary(woff2Fixture), false)
   const font = checkFixtureFace(woff2Fixture, 'woff2')
   const glyf = font.faces[0].tableList.find((t) => t.tag === 'glyf')
   assert.equal(glyf?.transformed, true)
@@ -122,7 +128,8 @@ test('refuses files that are not fonts', () => {
   assert.throws(() => openFont(new Uint8Array(0)), isFontError('not-a-font'))
 })
 
-test('reports a truncated font as damaged', () => {
+test('reports a truncated font as damaged', async () => {
+  await loadBrotliDictionary()
   assert.throws(() => openFont(ttfFixture.subarray(0, 20)), isFontError('damaged'))
   assert.throws(() => openFont(woff2Fixture.subarray(0, woff2Fixture.length - 40)), isFontError('damaged'))
 })

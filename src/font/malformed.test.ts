@@ -68,12 +68,13 @@ function format12(groups: [start: number, end: number, glyph: number][], format 
   return out.done()
 }
 
-function format4(segments: [start: number, end: number, delta: number][]): Uint8Array {
-  const all = [...segments, [0xffff, 0xffff, 1] as [number, number, number]]
+/** Segments [start, end, idDelta, idRangeOffset = 0]; the closing 0xFFFF segment is added. */
+function format4(segments: [start: number, end: number, delta: number, rangeOffset?: number][]): Uint8Array {
+  const all = [...segments, [0xffff, 0xffff, 1] as [number, number, number, number?]]
   const n = all.length
   const out = new Bytes().u16(4, 16 + n * 8, 0, n * 2, 0, 0, 0)
   out.u16(...all.map((s) => s[1])).u16(0).u16(...all.map((s) => s[0])).u16(...all.map((s) => s[2] & 0xffff))
-  out.u16(...all.map(() => 0))
+  out.u16(...all.map((s) => s[3] ?? 0))
   return out.done()
 }
 
@@ -233,7 +234,7 @@ test('name: blank records are skipped for the next best', () => {
 test('cmap: overlapping groups are read once and bounded', () => {
   const overlap = cmap([{ platform: 3, encoding: 10, data: format12(Array(16).fill([0, 0x10ffff, 1])) }])
   const bounded = parseCmap(overlap, 5000)
-  assert.equal(bounded.codes.length, 5000)
+  assert.equal(bounded.codes.length, 4999) // the group itself is one step of the 5000
   assert.ok(bounded.problems[0].includes('overlap'))
   const full = parseCmap(overlap)
   assert.equal(full.codes.length, 0x110000)
@@ -242,6 +243,35 @@ test('cmap: overlapping groups are read once and bounded', () => {
   const bmp = parseCmap(segments, 70000)
   assert.equal(bmp.codes.length, 0xffff)
   assert.ok(bmp.problems[0].includes('overlap'))
+})
+
+test('cmap: one budget for the whole call counts glyph reads that fall past the table', () => {
+  // idRangeOffset 0xFFFE sends every glyph read of 0..0xFFFE past the table: nothing is mapped,
+  // but each read is a step of the budget, so the call stops instead of looping in silence.
+  const pastTheTable = cmap([{ platform: 3, encoding: 1, data: format4([[0, 0xfffe, 0, 0xfffe]]) }])
+  const bounded = parseCmap(pastTheTable, 1000)
+  assert.equal(bounded.codes.length, 0)
+  assert.deepEqual(bounded.problems, ['cmap 3/1 format 4: reading stopped after 1000 steps (ranges that overlap or point past the table)'])
+  // A thousand such segments would be 65 million reads; the default budget stops them.
+  const many = parseCmap(cmap([{ platform: 3, encoding: 1, data: format4(Array(1000).fill([0, 0xfffe, 0, 0xfffe])) }]))
+  assert.equal(many.codes.length, 0)
+  assert.ok(many.problems[0].includes('reading stopped after'))
+})
+
+test('cmap: subtables that fail share one budget, and at most 16 are tried', () => {
+  // 40 format 6 subtables, each listing 65,535 glyphs: each reads on to the end of the table
+  // (about 1,100 glyph ids), then fails there, and the next one starts over.
+  const failing = Array.from({ length: 40 }, () => ({ platform: 3, encoding: 1, data: new Bytes().u16(6, 10, 0, 0x20, 0xffff).done() }))
+  const table = new Bytes().bytes(cmap(failing)).bytes(new Uint8Array(2000)).done()
+  const capped = parseCmap(table)
+  assert.equal(capped.codes.length, 0)
+  assert.equal(capped.problems.length, 17)
+  assert.ok(capped.problems.slice(0, 16).every((p) => p.startsWith('cmap 3/1 format 6: read of 2 bytes')))
+  assert.equal(capped.problems[16], 'cmap: only the first 16 subtables were tried')
+  // A budget of 3,000 steps is spent in the third subtable; no other is tried.
+  const shared = parseCmap(table, 3000)
+  assert.equal(shared.problems.length, 3)
+  assert.ok(shared.problems[2].includes('reading stopped after 3000 steps'))
 })
 
 test('cmap: codes in descending order come out sorted, first mapping wins', () => {

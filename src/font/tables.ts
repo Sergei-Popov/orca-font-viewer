@@ -289,13 +289,25 @@ export type CharMap = {
 
 const UNICODE_SIZE = 0x110000
 
-/** Thrown when a subtable makes the builder do more work than Unicode has code points. */
+/** Thrown when one parseCmap call has done all the work its budget allows. */
 class OverBudget extends Error {}
+
+/** The work one parseCmap call may do, shared by every subtable it tries. */
+class Work {
+  constructor(public left: number) {}
+
+  /** One loop step: a code point read, a segment or group visited, or a glyph read skipped. */
+  step(): void {
+    if (--this.left < 0) {
+      throw new OverBudget()
+    }
+  }
+}
 
 /**
  * Collects code point → glyph pairs. A code point is kept the first time it comes (a bitset
- * drops repeats), and the work is bounded: overlapping ranges cannot make it loop or grow
- * beyond `budget` code points.
+ * drops repeats), and every step is paid from the call's shared `work`, so overlapping ranges or
+ * glyph reads that fall past the table cannot make it loop for long.
  */
 class MapBuilder {
   private codes = new Uint32Array(1024)
@@ -306,13 +318,16 @@ class MapBuilder {
 
   constructor(
     private readonly macRoman: boolean,
-    private budget: number
+    private readonly work: Work
   ) {}
 
+  /** A loop step that adds nothing. */
+  step(): void {
+    this.work.step()
+  }
+
   add(code: number, glyph: number): void {
-    if (--this.budget < 0) {
-      throw new OverBudget()
-    }
+    this.work.step()
     if (this.macRoman) {
       // A Mac Roman subtable maps single bytes; the high half is not Latin-1.
       if (code > 0xff) return
@@ -373,10 +388,14 @@ const CMAP_PREFERENCE: [number, number][] = [
   [3, 10], [0, 6], [0, 4], [3, 1], [0, 3], [0, 2], [0, 1], [0, 0], [3, 0], [1, 0]
 ]
 
+/** Subtables one parseCmap call tries at most; real fonts have a handful. */
+export const MAX_CMAP_SUBTABLES = 16
+
 /**
  * The font's character map from its best subtable. A damaged subtable is skipped for the next
- * best one; `budget` bounds the code points a subtable may produce (overlapping ranges in a
- * hostile font would otherwise repeat all of Unicode many times).
+ * best one, up to MAX_CMAP_SUBTABLES. `budget` bounds the loop steps of the whole call, shared by
+ * every subtable tried: overlapping ranges, glyph reads past the table, or many overlapping
+ * subtables that each fail at the end would otherwise repeat all of Unicode many times.
  */
 export function parseCmap(bytes: Uint8Array, budget = 2 * UNICODE_SIZE): CharMap {
   const r = new Reader(bytes)
@@ -400,18 +419,24 @@ export function parseCmap(bytes: Uint8Array, budget = 2 * UNICODE_SIZE): CharMap
   subtables.sort((a, b) => rank(a) - rank(b))
   const problems: string[] = []
   const tried = new Set<string>()
+  const work = new Work(budget)
   for (const sub of subtables) {
     const label = `cmap ${sub.platform}/${sub.encoding} format ${sub.format}`
     const key = `${sub.offset}:${sub.platform === 1 && sub.encoding === 0}`
     if (tried.has(key)) continue
+    if (tried.size === MAX_CMAP_SUBTABLES) {
+      problems.push(`cmap: only the first ${MAX_CMAP_SUBTABLES} subtables were tried`)
+      break
+    }
     tried.add(key)
-    const builder = new MapBuilder(sub.platform === 1 && sub.encoding === 0, budget)
+    const builder = new MapBuilder(sub.platform === 1 && sub.encoding === 0, work)
     let known: boolean
     try {
       known = readSubtable(r, sub.offset, sub.format, builder)
     } catch (error) {
       if (error instanceof OverBudget) {
-        problems.push(`${label}: its ranges overlap; reading stopped after ${budget} code points`)
+        // The budget is spent: keep what this subtable gave and try no other.
+        problems.push(`${label}: reading stopped after ${budget} steps (ranges that overlap or point past the table)`)
         known = true
       } else {
         problems.push(`${label}: ${error instanceof Error ? error.message : String(error)}`)
@@ -442,6 +467,7 @@ function readSubtable(r: Reader, at: number, format: number, out: MapBuilder): b
       const idDeltas = startCodes + segCountX2
       const idRangeOffsets = idDeltas + segCountX2
       for (let s = 0; s < segCount; s++) {
+        out.step()
         const end = r.u16(endCodes + s * 2)
         const start = r.u16(startCodes + s * 2)
         const delta = r.i16(idDeltas + s * 2)
@@ -454,7 +480,10 @@ function readSubtable(r: Reader, at: number, format: number, out: MapBuilder): b
             glyph = (code + delta) & 0xffff
           } else {
             const glyphAt = rangeOffsetAt + rangeOffset + (code - start) * 2
-            if (!r.has(glyphAt, 2)) continue
+            if (!r.has(glyphAt, 2)) {
+              out.step()
+              continue
+            }
             glyph = r.u16(glyphAt)
             if (glyph !== 0) glyph = (glyph + delta) & 0xffff
           }
@@ -483,6 +512,7 @@ function readSubtable(r: Reader, at: number, format: number, out: MapBuilder): b
     case 13: {
       const groups = r.u32(at + 12)
       for (let g = 0; g < groups; g++) {
+        out.step()
         const group = at + 16 + g * 12
         const start = r.u32(group)
         const end = Math.min(r.u32(group + 4), UNICODE_SIZE - 1)

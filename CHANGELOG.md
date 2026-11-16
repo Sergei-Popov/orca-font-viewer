@@ -7,6 +7,8 @@ All notable changes to this plugin are documented here. The format follows
 
 ## [Unreleased]
 
+## [0.1.1] - 2026-11-16
+
 ### Changed
 
 - WOFF 2.0: the Brotli dictionary ships as a readable word list (`vendor/brotli/dictionary.mjs`,

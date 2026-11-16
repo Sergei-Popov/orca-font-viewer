@@ -1,9 +1,9 @@
 import { assert, test } from 'orca/testing'
 import { loadBrotliDictionary } from './font/brotli-dictionary'
-import { openFont } from './font/container'
+import { openFont, sniffFlavor } from './font/container'
 import { describeFace } from './font/info'
-import { otfFixture, ttcFixture, ttfFixture, woff2Fixture } from './font/test-fonts'
-import { axesFor, faceStyle, fontMime, renderSource, snapAxisValue } from './render'
+import { ttcFixture, ttfFixture, woff2Fixture } from './font/test-fonts'
+import { axesFor, faceStyle, renderSource, snapAxisValue } from './render'
 
 test('draws a single font from its own bytes and a collection face as a standalone font', async () => {
   await loadBrotliDictionary()
@@ -13,7 +13,7 @@ test('draws a single font from its own bytes and a collection face as a standalo
   const second = renderSource(collection, 1, ttcFixture)
   assert.ok(second.kind === 'bytes')
   if (second.kind !== 'bytes') return
-  assert.equal(fontMime(second.bytes), 'font/ttf')
+  assert.equal(sniffFlavor(second.bytes), 'sfnt')
   // The cut-out face opens as a plain font with the second face's names.
   const reopened = openFont(second.bytes)
   assert.equal(reopened.collection, false)
@@ -29,13 +29,6 @@ test('a WOFF2 collection with transformed outlines draws only its first face', a
   assert.deepEqual(renderSource(fake, 1, woff2Fixture), { kind: 'woff2-collection' })
   const first = renderSource(fake, 0, woff2Fixture)
   assert.ok(first.kind === 'bytes' && first.bytes === woff2Fixture)
-})
-
-test('names the MIME type of a font for a data: URL', () => {
-  assert.equal(fontMime(ttfFixture), 'font/ttf')
-  assert.equal(fontMime(otfFixture), 'font/otf')
-  assert.equal(fontMime(woff2Fixture), 'font/woff2')
-  assert.equal(fontMime(ttcFixture), 'font/collection')
 })
 
 test('keeps the moved axis values that fit the new face and styles the face with CSS', () => {

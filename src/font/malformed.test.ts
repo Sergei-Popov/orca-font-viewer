@@ -6,6 +6,7 @@ import { loadBrotliDictionary } from './brotli-dictionary'
 import { FontError } from './bytes'
 import { MAX_FACES, faceToSfnt, openFont } from './container'
 import { describeFace, faceLabel, faceLabels, newTableCache } from './info'
+import { renderSource } from '../render'
 import { LABEL_MAX, MAX_INSTANCES, MAX_NAME_DECODE_BYTES, parseCmap, parseFvar, parseName, trimNuls } from './tables'
 import { Bytes, buildFont, sfnt as buildSfnt, collection, ttfFixture, utf16 } from './test-fonts'
 
@@ -432,6 +433,55 @@ test('tables past the end of the file are reported; without head, name or cmap t
   const noCmap = sfnt({ name: BASIC_NAME, head: HEAD })
   new DataView(noCmap.buffer).setUint32(12 + 8, 0x7ffffff0) // head sorts first
   assert.equal(describeFace(openFont(noCmap).faces[0], 'en').damaged, 'head lies past the end of the file; the font has no cmap table')
+})
+
+// ------------------------------------------------------------------------------------------------
+// Faces cut out of a collection: overlapping or oversized tables are refused
+
+/**
+ * A one-face collection with the crafted font's own tables, then `aliases` more tags, each
+ * `[offset, length]` from `alias(fileSize, starts)`.
+ */
+function aliasedCollection(aliases: number, alias: (fileSize: number, starts: number[]) => [number, number]): Uint8Array {
+  const tables: Record<string, Uint8Array> = { cmap: cmap([{ platform: 3, encoding: 1, data: format4([[0x41, 0x5a, 1]]) }]), head: HEAD, name: BASIC_NAME }
+  const tags = Object.keys(tables)
+  const numTables = tags.length + aliases
+  let offset = 16 + 12 + numTables * 16
+  const starts = tags.map((tag) => {
+    const at = offset
+    offset += (tables[tag].length + 3) & ~3
+    return at
+  })
+  const fileSize = offset
+  const out = new Bytes().tag('ttcf').u32(0x00010000, 1, 16).u32(0x00010000).u16(numTables, 0, 0, 0)
+  tags.forEach((tag, i) => out.tag(tag).u32(0, starts[i], tables[tag].length))
+  for (let a = 0; a < aliases; a++) out.tag(`z${String(a).padStart(3, '0')}`).u32(0, ...alias(fileSize, starts))
+  for (const tag of tags) {
+    out.bytes(tables[tag])
+    while (out.length % 4) out.u8(0)
+  }
+  return out.done()
+}
+
+test('a collection face whose tables add up to more than the file is not cut out', () => {
+  // 300 tags that each name the whole file would make a cut-out 300 times its size.
+  const bytes = aliasedCollection(300, (fileSize) => [0, fileSize])
+  const container = openFont(bytes)
+  assert.equal(describeFace(container.faces[0], 'en').family, 'Crafted')
+  const source = renderSource(container, 0, bytes)
+  assert.equal(source.kind, 'error')
+  assert.ok(source.kind === 'error' && /tables add up to \d+ bytes, more than \d+/.test(source.message))
+  assert.throws(() => faceToSfnt(container.faces[0], 1 << 20), isDamaged(/add up to/))
+})
+
+test('a collection face whose tables overlap is not cut out', () => {
+  // One extra tag: four bytes inside cmap, so the total still fits the file.
+  const bytes = aliasedCollection(1, (_, starts) => [starts[0] + 4, 4])
+  const source = renderSource(openFont(bytes), 0, bytes)
+  assert.deepEqual(source, { kind: 'error', message: 'tables cmap and z000 of the face overlap' })
+  // Without the extra tag the same face cuts out.
+  const plain = aliasedCollection(0, () => [0, 0])
+  assert.equal(renderSource(openFont(plain), 0, plain).kind, 'bytes')
 })
 
 // ------------------------------------------------------------------------------------------------

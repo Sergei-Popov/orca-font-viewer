@@ -1,6 +1,6 @@
 // Which bytes Chromium gets to draw a face, and the CSS that styles it. DOM-free, so it is tested.
 
-import { type FontContainer, faceToSfnt } from './font/container'
+import { type FontContainer, MAX_CUT_OUT_BYTES, faceToSfnt } from './font/container'
 import { featureSettings, variationSettings } from './font/features'
 import type { FaceInfo } from './font/info'
 
@@ -9,25 +9,25 @@ export type RenderSource = { kind: 'bytes'; bytes: Uint8Array } | { kind: 'woff2
 /**
  * A single font file is drawn as it is (Chromium reads WOFF and WOFF2 itself). A face of a
  * collection is cut out into a standalone sfnt, because a FontFace always takes a collection's
- * first face. WOFF2 collections are the exception: their TrueType outlines are stored
+ * first face; a face whose tables overlap or outgrow the file is not cut out, and the viewer says
+ * it cannot be drawn. WOFF2 collections are the exception: their TrueType outlines are stored
  * transformed, which this viewer does not rebuild, so only the first face (the whole file) draws.
  */
 export function renderSource(container: FontContainer, index: number, original: Uint8Array): RenderSource {
   if (!container.collection) return { kind: 'bytes', bytes: original }
   const face = container.faces[index]
-  if (container.flavor === 'sfnt') return { kind: 'bytes', bytes: faceToSfnt(face) }
-  if (!face.tableList.some((table) => table.transformed)) return { kind: 'bytes', bytes: faceToSfnt(face) }
-  return index === 0 ? { kind: 'bytes', bytes: original } : { kind: 'woff2-collection' }
-}
-
-/** The MIME type for a data: URL fallback. */
-export function fontMime(bytes: Uint8Array): string {
-  const tag = String.fromCharCode(...bytes.subarray(0, 4))
-  if (tag === 'wOFF') return 'font/woff'
-  if (tag === 'wOF2') return 'font/woff2'
-  if (tag === 'OTTO') return 'font/otf'
-  if (tag === 'ttcf') return 'font/collection'
-  return 'font/ttf'
+  const transformed = face.tableList.some((table) => table.transformed)
+  if (container.flavor === 'woff2' && transformed) {
+    return index === 0 ? { kind: 'bytes', bytes: original } : { kind: 'woff2-collection' }
+  }
+  // A sfnt face's tables lie in the file, so they cannot add up to more than it; WOFF2's lie in
+  // the unpacked stream.
+  const limit = container.flavor === 'sfnt' ? Math.min(original.byteLength, MAX_CUT_OUT_BYTES) : MAX_CUT_OUT_BYTES
+  try {
+    return { kind: 'bytes', bytes: faceToSfnt(face, limit) }
+  } catch (error) {
+    return { kind: 'error', message: error instanceof Error ? error.message : String(error) }
+  }
 }
 
 /**

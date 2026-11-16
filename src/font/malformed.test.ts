@@ -7,7 +7,7 @@ import { FontError } from './bytes'
 import { MAX_FACES, faceToSfnt, openFont } from './container'
 import { describeFace, faceLabel, faceLabels, newTableCache } from './info'
 import { renderSource } from '../render'
-import { LABEL_MAX, MAX_INSTANCES, MAX_NAME_DECODE_BYTES, parseCmap, parseFvar, parseName, trimNuls } from './tables'
+import { LABEL_MAX, MAX_INSTANCES, MAX_NAME_DECODE_BYTES, advanceWidths, parseCmap, parseFvar, parseName, trimNuls } from './tables'
 import { Bytes, buildFont, sfnt as buildSfnt, collection, ttfFixture, utf16 } from './test-fonts'
 
 const isDamaged = (pattern?: RegExp) => (error: unknown) =>
@@ -482,6 +482,65 @@ test('a collection face whose tables overlap is not cut out', () => {
   // Without the extra tag the same face cuts out.
   const plain = aliasedCollection(0, () => [0, 0])
   assert.equal(renderSource(openFont(plain), 0, plain).kind, 'bytes')
+})
+
+// ------------------------------------------------------------------------------------------------
+// Monospaced: post, OS/2 PANOSE, or the advances of printable ASCII
+
+/**
+ * A font mapping U+0021–007E to glyphs 1–94, with `glyphs` glyphs whose advances `advance` gives,
+ * post's isFixedPitch and OS/2's PANOSE bytes.
+ */
+function metricsFont({ advance, panose = [], fixedPitch = false, glyphs = 95 }: { advance: (glyph: number) => number; panose?: number[]; fixedPitch?: boolean; glyphs?: number }): Uint8Array {
+  const os2 = new Bytes()
+    .u16(0, 600, 400, 5, 0) // version, xAvgCharWidth, weight, width, fsType
+    .u16(...Array(11).fill(0)) // sub- and superscripts, strikeout, family class
+    .u8(...panose, ...Array(10 - panose.length).fill(0))
+    .u32(0, 0, 0, 0)
+    .tag('TEST')
+    .u16(0x40, 0x21, 0x7e, 800, -200, 0, 800, 200) // fsSelection … winDescent
+    .done()
+  const hhea = new Bytes().u32(0x00010000).u16(800, -200, 0, 1800, 0, 0, 0, 1, 0, 0, 0, 0, 0, 0, 0, glyphs).done()
+  const hmtx = new Bytes()
+  for (let glyph = 0; glyph < glyphs; glyph++) hmtx.u16(advance(glyph), 0)
+  return sfnt({
+    'OS/2': os2,
+    cmap: cmap([{ platform: 3, encoding: 10, data: format12([[0x21, 0x7e, 1]]) }]),
+    head: HEAD,
+    hhea,
+    hmtx: hmtx.done(),
+    name: BASIC_NAME,
+    post: new Bytes().u32(0x00030000).fixed(0).u16(-100, 50).u32(fixedPitch ? 1 : 0, 0, 0, 0, 0).done()
+  })
+}
+
+const monospace = (bytes: Uint8Array) => describeFace(openFont(bytes).faces[0], 'en').monospace
+
+test('monospaced: a Noto Sans Mono-like font, whose post says proportional, by its PANOSE', () => {
+  // Noto Sans Mono: isFixedPitch 0, PANOSE 2 11 5 9 …; ASCII at 600, wide glyphs at 1200 and 1800.
+  const noto = (glyph: number) => (glyph < 95 ? 600 : glyph % 10 === 0 ? 1800 : 1200)
+  assert.equal(monospace(metricsFont({ advance: noto, panose: [2, 11, 5, 9, 4, 5, 4, 2, 2, 4], glyphs: 400 })), true)
+  // PANOSE 2/9 alone is enough, whatever the advances.
+  assert.equal(monospace(metricsFont({ advance: (glyph) => 300 + glyph * 7, panose: [2, 11, 5, 9] })), true)
+  // Monospaced proportion means it only for Latin Text: 9 in a decorative font's fourth byte is not it.
+  assert.equal(monospace(metricsFont({ advance: (glyph) => 300 + glyph * 7, panose: [4, 0, 0, 9] })), false)
+  assert.equal(monospace(metricsFont({ advance: () => 600, fixedPitch: true, glyphs: 2 })), true)
+})
+
+test('monospaced: by the advances of printable ASCII when post and PANOSE say nothing', () => {
+  // Roboto Mono-like: PANOSE family type 0, every glyph 1229.
+  assert.equal(monospace(metricsFont({ advance: () => 1229 })), true)
+  // Three of 94 ASCII glyphs wider (under 5 %): still monospaced.
+  assert.equal(monospace(metricsFont({ advance: (glyph) => (glyph === 10 || glyph === 20 || glyph === 30 ? 1200 : 600) })), true)
+  // Proportional Latin.
+  assert.equal(monospace(metricsFont({ advance: (glyph) => 300 + (glyph % 9) * 50 })), false)
+  // A CJK-like font: proportional ASCII, then 2,000 glyphs one em wide; they do not count.
+  assert.equal(monospace(metricsFont({ advance: (glyph) => (glyph < 95 ? 300 + (glyph % 9) * 50 : 1000), glyphs: 2095 })), false)
+  // Glyphs past numberOfHMetrics take the last advance; a record past the table is not measured.
+  assert.deepEqual(advanceWidths(new Bytes().u16(500, 0, 700, 0).done(), 2, [0, 1, 5]), [500, 700, 700])
+  assert.deepEqual(advanceWidths(new Bytes().u16(500, 0).done(), 3, [0, 2]), [500, null])
+  // The test fixture has four ASCII letters at 600: too few to tell.
+  assert.equal(monospace(ttfFixture), false)
 })
 
 // ------------------------------------------------------------------------------------------------

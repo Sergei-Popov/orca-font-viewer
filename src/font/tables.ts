@@ -244,11 +244,23 @@ export function parseHead(bytes: Uint8Array): HeadTable {
   }
 }
 
-export type HheaTable = { ascender: number; descender: number; lineGap: number }
+export type HheaTable = { ascender: number; descender: number; lineGap: number; numberOfHMetrics: number }
 
 export function parseHhea(bytes: Uint8Array): HheaTable {
   const r = new Reader(bytes)
-  return { ascender: r.i16(4), descender: r.i16(6), lineGap: r.i16(8) }
+  return { ascender: r.i16(4), descender: r.i16(6), lineGap: r.i16(8), numberOfHMetrics: r.has(34, 2) ? r.u16(34) : 0 }
+}
+
+/**
+ * The advance width of each of `glyphs` from an hmtx table: glyphs past numberOfHMetrics share
+ * the last record's advance; null for a glyph whose record lies past the table.
+ */
+export function advanceWidths(hmtx: Uint8Array, numberOfHMetrics: number, glyphs: readonly number[]): (number | null)[] {
+  const r = new Reader(hmtx)
+  return glyphs.map((glyph) => {
+    const at = Math.min(glyph, numberOfHMetrics - 1) * 4
+    return numberOfHMetrics > 0 && r.has(at, 2) ? r.u16(at) : null
+  })
 }
 
 export function parseMaxp(bytes: Uint8Array): number {
@@ -284,6 +296,8 @@ export type Os2Table = {
   winDescent: number
   xHeight: number | null
   capHeight: number | null
+  /** The 10 PANOSE bytes, or [] when the table is too short. */
+  panose: number[]
 }
 
 export function parseOs2(bytes: Uint8Array): Os2Table {
@@ -303,7 +317,8 @@ export function parseOs2(bytes: Uint8Array): Os2Table {
     winAscent: r.has(74, 2) ? r.u16(74) : 0,
     winDescent: r.has(76, 2) ? r.u16(76) : 0,
     xHeight: hasV2 ? r.i16(86) : null,
-    capHeight: hasV2 ? r.i16(88) : null
+    capHeight: hasV2 ? r.i16(88) : null,
+    panose: r.has(32, 10) ? Array.from({ length: 10 }, (_, i) => r.u8(32 + i)) : []
   }
 }
 

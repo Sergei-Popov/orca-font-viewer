@@ -12,6 +12,7 @@ import {
   type NameTable,
   type Os2Table,
   type PostTable,
+  advanceWidths,
   parseCmap,
   parseFeatureList,
   parseFvar,
@@ -183,6 +184,38 @@ export function faceLabels(faces: readonly Face[], uiLanguage: string, cache: Ta
   })
 }
 
+/**
+ * Whether a font is monospaced: post says so; or OS/2 PANOSE says Latin Text (2) with Monospaced
+ * proportion (9), as Noto Sans Mono does while its post says otherwise; or nearly all its printable
+ * ASCII characters (U+0021–007E, at least ten) have one advance width. Only ASCII is measured: in
+ * a CJK font nearly every glyph is one em wide, yet its Latin letters are proportional.
+ */
+export function isMonospace(post: PostTable | null, os2: Os2Table | null, hhea: HheaTable | null, hmtx: Uint8Array | undefined, cmap: CharMap): boolean {
+  if (post?.isFixedPitch) return true
+  if (os2?.panose[0] === 2 && os2.panose[3] === 9) return true
+  if (!hhea || !hmtx) return false
+  const glyphs: number[] = []
+  let lo = 0
+  let hi = cmap.codes.length
+  while (lo < hi) {
+    const mid = (lo + hi) >> 1
+    if (cmap.codes[mid] < 0x21) lo = mid + 1
+    else hi = mid
+  }
+  for (let i = lo; i < cmap.codes.length && cmap.codes[i] <= 0x7e; i++) {
+    if (cmap.glyphs[i] !== 0) glyphs.push(cmap.glyphs[i])
+  }
+  const counts = new Map<number, number>()
+  let measured = 0
+  for (const advance of advanceWidths(hmtx, hhea.numberOfHMetrics, glyphs)) {
+    if (!advance) continue
+    measured++
+    counts.set(advance, (counts.get(advance) ?? 0) + 1)
+  }
+  if (measured < 10) return false
+  return Math.max(...counts.values()) >= measured * 0.95
+}
+
 export function describeFace(face: Face, uiLanguage: string, cache: TableCache = newTableCache()): FaceInfo {
   if (face.error) {
     return emptyInfo(face, face.error)
@@ -296,7 +329,7 @@ export function describeFace(face: Face, uiLanguage: string, cache: TableCache =
     instances,
     features: [...features.values()],
     color,
-    monospace: post?.isFixedPitch ?? false,
+    monospace: isMonospace(post, os2, hhea, table('hmtx'), cmap),
     variable: tableNames.has('fvar') && axes.length > 0,
     problems,
     damaged

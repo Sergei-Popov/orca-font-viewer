@@ -6,7 +6,7 @@ type Names = { en: string; ru: string }
 const NAMES: Record<string, Names> = {
   aalt: { en: 'Access all alternates', ru: 'Все альтернативы' },
   afrc: { en: 'Alternative fractions', ru: 'Дроби с косой чертой' },
-  c2pc: { en: 'Petite capitals from capitals', ru: 'Прописные в малые капители (petite)' },
+  c2pc: { en: 'Petite capitals from capitals', ru: 'Прописные в мини-капитель' },
   c2sc: { en: 'Small capitals from capitals', ru: 'Прописные в капитель' },
   calt: { en: 'Contextual alternates', ru: 'Контекстные варианты' },
   case: { en: 'Case-sensitive forms', ru: 'Формы для прописных' },
@@ -33,7 +33,7 @@ const NAMES: Record<string, Names> = {
   ordn: { en: 'Ordinals', ru: 'Порядковые' },
   ornm: { en: 'Ornaments', ru: 'Орнаменты' },
   palt: { en: 'Proportional alternate widths', ru: 'Пропорциональные (альт.)' },
-  pcap: { en: 'Petite capitals', ru: 'Малые капители (petite)' },
+  pcap: { en: 'Petite capitals', ru: 'Мини-капитель' },
   pnum: { en: 'Proportional figures', ru: 'Пропорциональные цифры' },
   pwid: { en: 'Proportional widths', ru: 'Пропорциональная ширина' },
   ruby: { en: 'Ruby notation forms', ru: 'Формы руби' },

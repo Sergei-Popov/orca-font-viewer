@@ -147,6 +147,7 @@ export class CharactersTab {
     const s = this.host.strings
     this.search.value = this.state.query
     const options = blockOptions(groupByBlock(info.cmap.codes))
+    const locale = this.host.language === 'ru' ? 'ru-RU' : 'en-US'
     this.blockNames = fontBlockNames(
       options.map((option) => option.block),
       this.host.language
@@ -154,7 +155,7 @@ export class CharactersTab {
     this.blockSelect.replaceChildren(h('option', { value: '' }, s.allBlocks))
     for (const option of options) {
       this.blockSelect.append(
-        h('option', { value: option.value }, `${blockLabel(option.block, this.host.language, s.noBlock)} (${option.count})`)
+        h('option', { value: option.value }, `${blockLabel(option.block, this.host.language, s.noBlock)} (${option.count.toLocaleString(locale)})`)
       )
     }
     if (!options.some((option) => option.value === this.state.block)) this.state.block = ''

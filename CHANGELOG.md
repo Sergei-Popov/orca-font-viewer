@@ -49,7 +49,9 @@ All notable changes to this plugin are documented here. The format follows
   the width of at least 80% of the glyphs the font maps. Emoji fonts (only `#*0-9` in ASCII),
   fallback fonts (one glyph for everything) and dual-width CJK fonts are not counted.
 - Russian UI: weight and width classes have Russian names, the symbol font note and the reason a
-  face cannot be shown are translated, and the line height uses a decimal comma.
+  face cannot be shown are translated, petite capitals are "мини-капитель", the line height and the
+  axis ranges in the slider tooltips use a decimal comma, and the block filter's counts group their
+  digits as the rest of the UI does.
 - README and code comments gave Orca's limit for plugin editors as 64 MiB; it is 50 MiB. The README
   has a Known limits section, and `vendor/README.md` links each library's upstream.
 

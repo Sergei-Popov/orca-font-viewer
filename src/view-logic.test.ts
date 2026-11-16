@@ -255,6 +255,8 @@ test('picks a sample the font can draw', () => {
 test('offers user-facing feature switches with names', () => {
   assert.equal(featureName('smcp', null, 'en'), 'Small capitals')
   assert.equal(featureName('smcp', null, 'ru'), 'Капитель')
+  assert.equal(featureName('pcap', null, 'ru'), 'Мини-капитель')
+  assert.equal(featureName('c2pc', null, 'ru'), 'Прописные в мини-капитель')
   assert.equal(featureName('ss03', null, 'en'), 'Stylistic set 3')
   assert.equal(featureName('cv11', null, 'ru'), 'Вариант знака 11')
   assert.equal(featureName('ss01', 'Single-storey a', 'en'), 'Single-storey a')

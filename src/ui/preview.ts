@@ -295,7 +295,8 @@ export class PreviewTab {
         matchInstance()
         this.host.onStyleChange()
       })
-      const title = axis.hidden ? `${axis.tag} · ${s.hiddenAxis}` : `${axis.tag}: ${axis.min}–${axis.max}`
+      const language = this.host.language
+      const title = axis.hidden ? `${axis.tag} · ${s.hiddenAxis}` : `${axis.tag}: ${formatNumber(axis.min, language)}–${formatNumber(axis.max, language)}`
       return h(
         'div',
         { class: 'fv-axis', title },

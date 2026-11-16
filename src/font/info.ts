@@ -1,6 +1,7 @@
 // Everything the viewer shows about one face, read from its tables. Missing or damaged tables
 // leave their fields empty instead of failing the whole font.
 
+import { fill, stringsFor } from '../i18n'
 import { FontError } from './bytes'
 import { type Face, SFNT_TRUETYPE } from './container'
 import {
@@ -305,9 +306,10 @@ export function describeFace(face: Face, uiLanguage: string, cache: TableCache =
   if (missing.length) {
     const outside = missing.filter((tag) => face.tableList.some((t) => t.tag === tag && t.outside))
     const absent = missing.filter((tag) => !outside.includes(tag))
+    const s = stringsFor(uiLanguage)
     damaged = [
-      outside.length ? `${outside.join(', ')} ${outside.length === 1 ? 'lies' : 'lie'} past the end of the file` : '',
-      absent.length ? `the font has no ${absent.join(', ')} table` : ''
+      outside.length ? fill(outside.length === 1 ? s.damageOutsideOne : s.damageOutsideMany, { tables: outside.join(', ') }) : '',
+      absent.length ? fill(absent.length === 1 ? s.damageMissingOne : s.damageMissingMany, { tables: absent.join(', ') }) : ''
     ]
       .filter(Boolean)
       .join('; ')

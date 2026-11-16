@@ -433,6 +433,12 @@ test('tables past the end of the file are reported; without head, name or cmap t
   const noCmap = sfnt({ name: BASIC_NAME, head: HEAD })
   new DataView(noCmap.buffer).setUint32(12 + 8, 0x7ffffff0) // head sorts first
   assert.equal(describeFace(openFont(noCmap).faces[0], 'en').damaged, 'head lies past the end of the file; the font has no cmap table')
+  // In the Russian UI the reason is Russian too.
+  assert.equal(describeFace(openFont(cut).faces[0], 'ru').damaged, 'таблицы head, name, cmap выходят за конец файла')
+  assert.equal(describeFace(openFont(noCmap).faces[0], 'ru').damaged, 'таблица head выходит за конец файла; в шрифте нет таблицы cmap')
+  const noNameOrCmap = sfnt({ head: HEAD })
+  assert.equal(describeFace(openFont(noNameOrCmap).faces[0], 'en').damaged, 'the font has no name, cmap tables')
+  assert.equal(describeFace(openFont(noNameOrCmap).faces[0], 'ru').damaged, 'в шрифте нет таблиц name, cmap')
 })
 
 // ------------------------------------------------------------------------------------------------

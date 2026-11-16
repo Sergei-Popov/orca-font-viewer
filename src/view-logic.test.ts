@@ -1,5 +1,5 @@
 import { assert, test } from 'orca/testing'
-import { ALPHABET_LINES, alphabetLines, defaultSample, embeddingLabel, formatBytes, formatDate, weightLabel, widthLabel } from './describe'
+import { ALPHABET_LINES, alphabetLines, defaultSample, embeddingLabel, formatBytes, formatDate, formatFixed, weightLabel, widthLabel } from './describe'
 import {
   blockLabel,
   blockOf,
@@ -167,10 +167,19 @@ test('measures coverage of sorted code points', () => {
 })
 
 test('describes weights, widths and embedding rights', () => {
-  assert.equal(weightLabel(700), '700 (Bold)')
-  assert.equal(weightLabel(450), '450 (≈ Regular)')
-  assert.equal(widthLabel(5), '5 (Normal)')
-  assert.equal(widthLabel(12), '12')
+  assert.equal(weightLabel(700, 'en'), '700 (Bold)')
+  assert.equal(weightLabel(450, 'en'), '450 (≈ Regular)')
+  assert.equal(widthLabel(5, 'en'), '5 (Normal)')
+  assert.equal(widthLabel(12, 'en'), '12')
+  // Russian names in the Russian UI, and Russian decimals.
+  assert.equal(weightLabel(700, 'ru'), '700 (Жирный)')
+  assert.equal(weightLabel(950, 'ru'), '950 (Сверхчёрный)')
+  assert.equal(weightLabel(380, 'ru'), '380 (≈ Обычный)')
+  assert.equal(widthLabel(3, 'ru'), '3 (Сжатый)')
+  assert.equal(widthLabel(9, 'ru'), '9 (Ультрарасширенный)')
+  assert.equal(formatFixed(1.25, 2, 'ru'), '1,25')
+  assert.equal(formatFixed(1.2, 2, 'en'), '1.20')
+  assert.equal(fill(ru.cmapSymbol, { source: '3/0' }), '3/0 (символьный шрифт)')
   assert.equal(embeddingLabel(0, en), en.embedInstallable)
   assert.equal(embeddingLabel(0x0002, en), en.embedRestricted)
   assert.equal(embeddingLabel(0x0004, en), en.embedPreview)

@@ -20,9 +20,12 @@ All notable changes to this plugin are documented here. The format follows
   Info tab), built by `scripts/listing-image.sh` from `tools/listing.json` with OFL demo fonts
   that `tools/listing-samples.sh` downloads at pinned sha256s and never commits. The manifest
   lists each image with its alt text only, and the description is shorter (298 characters).
-- Characters search: words are a block search only when they match a block the font has (by its
-  English name or its name in the UI language); otherwise the box searches for the characters
-  typed, however many, so "greek" in a font without Greek finds g, r, e and k.
+- Characters search: words are a block search only when they begin words of the name of a block
+  the font has (by its English name or its name in the UI language), so "ate" no longer finds
+  "Private Use Area"; otherwise the box searches for the characters typed, however many, so
+  "greek" in a font without Greek finds g, r, e and k. A single word of up to eight characters that
+  only begins a block name, and whose characters are all in the font, shows both: "сим" shows с, и,
+  м first, then the symbol blocks.
 
 ### Fixed
 
